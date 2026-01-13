@@ -452,17 +452,22 @@ fn detect_status_from_content(content: &str) -> SessionStatus {
 }
 
 fn is_permission_prompt(content: &str) -> bool {
-    let last_lines: String = content.lines().rev().take(20).collect::<Vec<_>>().join("\n");
-    let patterns = [
-        "Allow",
-        "Deny",
-        "approve",
-        "permission",
-        "[y/n]",
-        "Yes, allow",
-        "allow once",
-    ];
-    patterns.iter().any(|p| last_lines.to_lowercase().contains(&p.to_lowercase()))
+    // Codex permission prompts are specific interactive dialogs
+    let last_lines: Vec<&str> = content.lines().rev().take(8).collect();
+    let last_content = last_lines.join("\n");
+
+    // Look for actual interactive permission UI
+    let has_interactive = last_content.contains("❯") || // Selection arrow
+                          last_content.contains("[Y/n]") ||
+                          last_content.contains("[y/N]") ||
+                          last_content.contains("(y/n)");
+
+    // Must have permission-related context
+    let has_permission_context = last_content.to_lowercase().contains("approve") ||
+                                  last_content.to_lowercase().contains("allow codex") ||
+                                  last_content.to_lowercase().contains("run this");
+
+    has_interactive && has_permission_context
 }
 
 fn extract_permission_detail(content: &str) -> Option<String> {

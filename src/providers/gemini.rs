@@ -400,20 +400,23 @@ fn detect_status_from_content(content: &str) -> SessionStatus {
 }
 
 fn is_permission_prompt(content: &str) -> bool {
-    let last_lines: String = content.lines().rev().take(20).collect::<Vec<_>>().join("\n");
-    let patterns = [
-        "Allow",
-        "Deny",
-        "approve",
-        "permission",
-        "[y/n]",
-        "Yes, allow",
-        "allow once",
-        "YOLO",
-    ];
-    patterns
-        .iter()
-        .any(|p| last_lines.to_lowercase().contains(&p.to_lowercase()))
+    // Gemini permission prompts are very specific interactive dialogs
+    // Only match actual prompts, not keywords in regular output
+    let last_lines: Vec<&str> = content.lines().rev().take(8).collect();
+    let last_content = last_lines.join("\n");
+
+    // Look for actual interactive permission UI (arrow selection, bracketed options)
+    let has_interactive_prompt = last_content.contains("❯") || // Selection arrow
+                                  last_content.contains("[ ]") || // Checkbox
+                                  last_content.contains("[x]") || // Checked box
+                                  (last_content.contains("(y/n)") && last_content.contains("?"));
+
+    // Must also have a permission-related question
+    let has_permission_question = last_content.contains("allow this") ||
+                                   last_content.contains("execute this") ||
+                                   last_content.contains("run this command");
+
+    has_interactive_prompt && has_permission_question
 }
 
 fn extract_permission_detail(content: &str) -> Option<String> {

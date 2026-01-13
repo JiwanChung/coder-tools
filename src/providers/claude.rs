@@ -472,17 +472,26 @@ fn detect_status_from_content(content: &str) -> SessionStatus {
 }
 
 fn is_permission_prompt(content: &str) -> bool {
-    let last_lines: String = content.lines().rev().take(20).collect::<Vec<_>>().join("\n");
-    let patterns = [
-        "Allow",
-        "Deny",
-        "Yes, allow",
-        "allow this",
+    // Claude permission prompts have the ⏵⏵ marker or specific interactive buttons
+    let last_lines: Vec<&str> = content.lines().rev().take(10).collect();
+    let last_content = last_lines.join("\n");
+
+    // Check for permission mode marker (most reliable)
+    if content.contains("⏵⏵") {
+        return true;
+    }
+
+    // Look for actual interactive permission buttons (very specific)
+    // These are selectable options shown at the bottom
+    let button_patterns = [
+        "Yes, allow once",
+        "Yes, allow always",
         "Yes, proceed",
-        "allow once",
-        "allow always",
+        "No, deny",
+        "Don't allow",
     ];
-    patterns.iter().any(|p| last_lines.contains(p))
+
+    button_patterns.iter().any(|p| last_content.contains(p))
 }
 
 fn extract_permission_detail(content: &str) -> Option<String> {
