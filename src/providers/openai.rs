@@ -22,17 +22,21 @@ impl Provider for OpenAIProvider {
     }
 
     fn detect(&self, tty: &str, pane_title: &str, content: &str) -> bool {
-        // Primary detection: Codex process with matching session file
+        // Fast check first: screen content has Codex UI elements
+        if is_codex_session(content) {
+            return true;
+        }
+
+        // Fast check: pane title has Codex marker
+        if pane_title.to_lowercase().contains("codex") {
+            return true;
+        }
+
+        // Slow check: process detection (only if fast checks fail)
         if find_codex_pid_by_tty(tty).is_some() {
             if find_latest_session_jsonl().is_some() {
                 return true;
             }
-        }
-
-        // Secondary: pane title has Codex marker AND screen has Codex UI elements
-        if (pane_title.contains("codex") || pane_title.contains("Codex"))
-            && is_codex_session(content) {
-            return true;
         }
 
         false

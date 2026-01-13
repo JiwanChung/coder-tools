@@ -23,18 +23,23 @@ impl Provider for ClaudeProvider {
     }
 
     fn detect(&self, tty: &str, pane_title: &str, content: &str) -> bool {
-        // Primary detection: Claude process with matching JSONL session file
+        // Fast check first: screen content has Claude UI elements
+        if is_claude_code_session(content) {
+            return true;
+        }
+
+        // Fast check: pane title has Claude marker
+        if pane_title.contains("✳") {
+            return true;
+        }
+
+        // Slow check: process detection (only if fast checks fail)
         if let Some(pid) = find_claude_pid_by_tty(tty) {
             if let Some(cwd) = get_process_cwd(pid) {
                 if find_session_jsonl(&cwd).is_some() {
                     return true;
                 }
             }
-        }
-
-        // Secondary: pane title has Claude marker AND screen has Claude UI elements
-        if pane_title.contains("✳") && is_claude_code_session(content) {
-            return true;
         }
 
         false

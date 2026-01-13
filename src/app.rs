@@ -107,7 +107,18 @@ impl App {
 
             let content = tmux::capture_pane(&pane.id, self.capture_lines).unwrap_or_default();
             let content_hash = hash_content(&content);
-            let status = detector::detect_status_from_session(&pane.tty, &content, Some(&pane.title));
+
+            // Skip expensive detection if content hasn't changed
+            let status = if let Some(existing) = self.pane_states.get(&pane.id) {
+                if existing.last_content_hash == content_hash {
+                    // Content unchanged, reuse existing status
+                    existing.status.clone()
+                } else {
+                    detector::detect_status_from_session(&pane.tty, &content, Some(&pane.title))
+                }
+            } else {
+                detector::detect_status_from_session(&pane.tty, &content, Some(&pane.title))
+            };
 
             // Get preview (last non-empty line)
             let preview = content

@@ -20,18 +20,22 @@ impl Provider for GeminiProvider {
         ProviderKind::Gemini
     }
 
-    fn detect(&self, tty: &str, _pane_title: &str, content: &str) -> bool {
-        // Primary detection: Gemini process on TTY + project directory exists
+    fn detect(&self, tty: &str, pane_title: &str, content: &str) -> bool {
+        // Fast check first: screen content has Gemini UI elements
+        if is_gemini_session(content) {
+            return true;
+        }
+
+        // Fast check: pane title has Gemini marker
+        if pane_title.to_lowercase().contains("gemini") {
+            return true;
+        }
+
+        // Slow check: process detection (only if fast checks fail)
         if find_gemini_pid_by_tty(tty).is_some() {
-            // Check for any project directory in ~/.gemini/tmp/
             if find_latest_project().is_some() {
                 return true;
             }
-        }
-
-        // Secondary: screen content has clear Gemini UI elements
-        if is_gemini_session(content) {
-            return true;
         }
 
         false

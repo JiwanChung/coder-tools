@@ -39,7 +39,7 @@ enum Commands {
         interval: u64,
 
         /// Number of lines to capture from each pane
-        #[arg(short, long, default_value = "100")]
+        #[arg(short, long, default_value = "50")]
         lines: usize,
 
         /// Show all panes, not just Claude Code sessions
