@@ -21,18 +21,23 @@ impl Provider for GeminiProvider {
     }
 
     fn detect(&self, tty: &str, pane_title: &str, content: &str) -> bool {
-        // Check pane title for Gemini marker
-        if pane_title.contains("gemini") || pane_title.contains("Gemini") {
-            return true;
-        }
-
-        // Check if Gemini process is running on this TTY
+        // Primary detection: Gemini process running on this TTY
         if find_gemini_pid_by_tty(tty).is_some() {
+            // Verify we have session files
+            if let Some(project_hash) = find_latest_project() {
+                if find_latest_session_for_project(&project_hash).is_some() {
+                    return true;
+                }
+            }
+        }
+
+        // Secondary: pane title has Gemini marker AND screen has Gemini UI elements
+        if (pane_title.contains("gemini") || pane_title.contains("Gemini"))
+            && is_gemini_session(content) {
             return true;
         }
 
-        // Fallback: check screen content for Gemini UI elements
-        is_gemini_session(content)
+        false
     }
 
     fn get_session_info(&self, tty: &str, pane_title: &str, content: &str) -> SessionInfo {

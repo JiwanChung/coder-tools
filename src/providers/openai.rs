@@ -22,18 +22,20 @@ impl Provider for OpenAIProvider {
     }
 
     fn detect(&self, tty: &str, pane_title: &str, content: &str) -> bool {
-        // Check pane title for Codex marker
-        if pane_title.contains("codex") || pane_title.contains("Codex") {
-            return true;
-        }
-
-        // Check if Codex process is running on this TTY
+        // Primary detection: Codex process with matching session file
         if find_codex_pid_by_tty(tty).is_some() {
+            if find_latest_session_jsonl().is_some() {
+                return true;
+            }
+        }
+
+        // Secondary: pane title has Codex marker AND screen has Codex UI elements
+        if (pane_title.contains("codex") || pane_title.contains("Codex"))
+            && is_codex_session(content) {
             return true;
         }
 
-        // Fallback: check screen content for Codex UI elements
-        is_codex_session(content)
+        false
     }
 
     fn get_session_info(&self, tty: &str, pane_title: &str, content: &str) -> SessionInfo {
