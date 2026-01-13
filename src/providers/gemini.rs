@@ -20,20 +20,15 @@ impl Provider for GeminiProvider {
         ProviderKind::Gemini
     }
 
-    fn detect(&self, tty: &str, pane_title: &str, content: &str) -> bool {
+    fn detect(&self, tty: &str, _pane_title: &str, content: &str) -> bool {
         // Primary detection: Gemini process running on this TTY
+        // Note: Gemini may not have session files until after activity
         if find_gemini_pid_by_tty(tty).is_some() {
-            // Verify we have session files
-            if let Some(project_hash) = find_latest_project() {
-                if find_latest_session_for_project(&project_hash).is_some() {
-                    return true;
-                }
-            }
+            return true;
         }
 
-        // Secondary: pane title has Gemini marker AND screen has Gemini UI elements
-        if (pane_title.contains("gemini") || pane_title.contains("Gemini"))
-            && is_gemini_session(content) {
+        // Secondary: screen content has clear Gemini UI elements
+        if is_gemini_session(content) {
             return true;
         }
 
