@@ -20,18 +20,13 @@ impl Provider for GeminiProvider {
         ProviderKind::Gemini
     }
 
-    fn detect(&self, tty: &str, pane_title: &str, content: &str) -> bool {
-        // Fast check first: screen content has Gemini UI elements
-        if is_gemini_session(content) {
-            return true;
-        }
-
-        // Fast check: pane title has Gemini marker
+    fn detect(&self, tty: &str, pane_title: &str, _content: &str) -> bool {
+        // Check pane title for Gemini marker
         if pane_title.to_lowercase().contains("gemini") {
             return true;
         }
 
-        // Slow check: process detection (only if fast checks fail)
+        // Process detection with project directory verification
         if find_gemini_pid_by_tty(tty).is_some() {
             if find_latest_project().is_some() {
                 return true;
@@ -365,6 +360,7 @@ fn get_session_info_by_tty(tty: &str) -> Option<RawSessionInfo> {
 // Content-based detection (fallback)
 // ============================================================================
 
+#[allow(dead_code)]
 fn is_gemini_session(content: &str) -> bool {
     let indicators = [
         "Gemini CLI",

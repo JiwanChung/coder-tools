@@ -22,18 +22,13 @@ impl Provider for ClaudeProvider {
         ProviderKind::Claude
     }
 
-    fn detect(&self, tty: &str, pane_title: &str, content: &str) -> bool {
-        // Fast check first: screen content has Claude UI elements
-        if is_claude_code_session(content) {
-            return true;
-        }
-
-        // Fast check: pane title has Claude marker
+    fn detect(&self, tty: &str, pane_title: &str, _content: &str) -> bool {
+        // Check pane title for Claude marker (fast, reliable)
         if pane_title.contains("✳") {
             return true;
         }
 
-        // Slow check: process detection (only if fast checks fail)
+        // Process detection with session file verification
         if let Some(pid) = find_claude_pid_by_tty(tty) {
             if let Some(cwd) = get_process_cwd(pid) {
                 if find_session_jsonl(&cwd).is_some() {
@@ -461,6 +456,7 @@ fn get_session_info_by_tty(tty: &str) -> Option<RawSessionInfo> {
 // Content-based detection (fallback)
 // ============================================================================
 
+#[allow(dead_code)]
 fn is_claude_code_session(content: &str) -> bool {
     let indicators = ["⏺ ", "⎿", "✢", "⏵⏵", "Claude Code"];
     indicators.iter().any(|i| content.contains(i))
