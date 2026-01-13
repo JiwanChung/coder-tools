@@ -21,10 +21,12 @@ impl Provider for GeminiProvider {
     }
 
     fn detect(&self, tty: &str, _pane_title: &str, content: &str) -> bool {
-        // Primary detection: Gemini process running on this TTY
-        // Note: Gemini may not have session files until after activity
+        // Primary detection: Gemini process on TTY + project directory exists
         if find_gemini_pid_by_tty(tty).is_some() {
-            return true;
+            // Check for any project directory in ~/.gemini/tmp/
+            if find_latest_project().is_some() {
+                return true;
+            }
         }
 
         // Secondary: screen content has clear Gemini UI elements
