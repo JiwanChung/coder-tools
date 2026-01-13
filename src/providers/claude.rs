@@ -1,3 +1,6 @@
+//! Claude Code provider implementation
+
+use super::{Provider, ProviderKind, SessionInfo, SessionStatus};
 use crate::pricing::{self, SessionCost};
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -6,24 +9,123 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Information about a Claude Code session derived from its files
+pub struct ClaudeProvider;
+
+impl ClaudeProvider {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Provider for ClaudeProvider {
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::Claude
+    }
+
+    fn detect(&self, tty: &str, pane_title: &str, content: &str) -> bool {
+        // Check pane title for Claude marker
+        if pane_title.contains("✳") {
+            return true;
+        }
+
+        // Check if Claude process is running on this TTY
+        if find_claude_pid_by_tty(tty).is_some() {
+            return true;
+        }
+
+        // Fallback: check screen content for Claude UI elements
+        is_claude_code_session(content)
+    }
+
+    fn get_session_info(&self, tty: &str, pane_title: &str, content: &str) -> SessionInfo {
+        let mut info = SessionInfo {
+            provider: ProviderKind::Claude,
+            ..Default::default()
+        };
+
+        // Extract task from pane title
+        info.task = extract_task_from_title(pane_title);
+
+        // Try to get detailed info from session files
+        if let Some(raw_info) = get_session_info_by_tty(tty) {
+            // Determine status from debug log signals
+            info.status = if raw_info.is_streaming {
+                SessionStatus::Working
+            } else if raw_info.is_idle {
+                if is_permission_prompt(content) {
+                    SessionStatus::PermissionRequired
+                } else {
+                    SessionStatus::WaitingForInput
+                }
+            } else {
+                // Fallback to stop_reason
+                match raw_info.stop_reason.as_deref() {
+                    Some("tool_use") => {
+                        if is_permission_prompt(content) {
+                            SessionStatus::PermissionRequired
+                        } else {
+                            SessionStatus::Working
+                        }
+                    }
+                    Some("end_turn") => SessionStatus::WaitingForInput,
+                    _ => detect_status_from_content(content),
+                }
+            };
+
+            // Build detail string
+            info.detail = if info.status == SessionStatus::Working {
+                match (&raw_info.current_tool, &raw_info.tool_detail) {
+                    (Some(tool), Some(detail)) => Some(format!("{}: {}", tool, detail)),
+                    (Some(tool), None) => Some(tool.clone()),
+                    _ => raw_info.last_user_prompt.clone(),
+                }
+            } else if info.status == SessionStatus::PermissionRequired {
+                extract_permission_detail(content)
+            } else {
+                raw_info.last_user_prompt.clone().or_else(|| extract_last_action(content))
+            };
+
+            info.last_user_prompt = raw_info.last_user_prompt;
+            info.current_tool = raw_info.current_tool;
+            info.tool_detail = raw_info.tool_detail;
+            info.model = raw_info.model;
+            info.cost = raw_info.session_cost;
+        } else {
+            // Fallback to content-based detection
+            info.status = detect_status_from_content(content);
+            if info.status == SessionStatus::PermissionRequired {
+                info.detail = extract_permission_detail(content);
+            } else {
+                info.detail = extract_last_action(content);
+            }
+        }
+
+        info
+    }
+}
+
+// ============================================================================
+// Claude-specific detection helpers
+// ============================================================================
+
+/// Raw session info from Claude files
 #[derive(Debug, Clone, Default)]
-pub struct SessionInfo {
-    pub session_id: Option<String>,
-    pub cwd: Option<String>,
-    pub last_user_prompt: Option<String>,
-    pub current_tool: Option<String>,
-    pub tool_detail: Option<String>,
-    pub model: Option<String>,
-    pub stop_reason: Option<String>,
-    pub is_streaming: bool,
-    pub is_idle: bool,
-    pub session_cost: Option<SessionCost>,
+struct RawSessionInfo {
+    session_id: Option<String>,
+    #[allow(dead_code)]
+    cwd: Option<String>,
+    last_user_prompt: Option<String>,
+    current_tool: Option<String>,
+    tool_detail: Option<String>,
+    model: Option<String>,
+    stop_reason: Option<String>,
+    is_streaming: bool,
+    is_idle: bool,
+    session_cost: Option<SessionCost>,
 }
 
 /// Find Claude process PID by TTY
-pub fn find_claude_pid_by_tty(tty: &str) -> Option<u32> {
-    // Strip /dev/ prefix if present for ps matching
+fn find_claude_pid_by_tty(tty: &str) -> Option<u32> {
     let tty_name = tty.trim_start_matches("/dev/");
 
     let output = Command::new("ps")
@@ -42,7 +144,7 @@ pub fn find_claude_pid_by_tty(tty: &str) -> Option<u32> {
 }
 
 /// Get the current working directory of a process
-pub fn get_process_cwd(pid: u32) -> Option<String> {
+fn get_process_cwd(pid: u32) -> Option<String> {
     let output = Command::new("lsof")
         .args(["-p", &pid.to_string()])
         .output()
@@ -51,7 +153,6 @@ pub fn get_process_cwd(pid: u32) -> Option<String> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
         if line.contains("cwd") {
-            // lsof output format: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 9 {
                 return Some(parts[8..].join(" "));
@@ -62,7 +163,6 @@ pub fn get_process_cwd(pid: u32) -> Option<String> {
 }
 
 /// Encode a path to Claude's project folder format
-/// Claude Code replaces /, _, ., and space with -
 fn encode_path(path: &str) -> String {
     path.chars()
         .map(|c| match c {
@@ -72,23 +172,19 @@ fn encode_path(path: &str) -> String {
         .collect()
 }
 
-/// Get the Claude projects directory
 fn claude_projects_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("projects"))
 }
 
-/// Get the Claude debug directory
 fn claude_debug_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("debug"))
 }
 
-/// Get the Claude history file
 fn claude_history_file() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("history.jsonl"))
 }
 
-/// Find the most recent session JSONL file for a project
-pub fn find_session_jsonl(cwd: &str) -> Option<PathBuf> {
+fn find_session_jsonl(cwd: &str) -> Option<PathBuf> {
     let projects_dir = claude_projects_dir()?;
     let encoded = encode_path(cwd);
     let project_dir = projects_dir.join(&encoded);
@@ -97,7 +193,6 @@ pub fn find_session_jsonl(cwd: &str) -> Option<PathBuf> {
         return None;
     }
 
-    // Find most recently modified .jsonl file (not in subdirs, not agent- prefixed)
     let mut jsonl_files: Vec<_> = fs::read_dir(&project_dir)
         .ok()?
         .filter_map(|e| e.ok())
@@ -117,8 +212,7 @@ pub fn find_session_jsonl(cwd: &str) -> Option<PathBuf> {
     jsonl_files.last().map(|e| e.path())
 }
 
-/// Get the debug file for a session
-pub fn get_debug_file(session_id: &str) -> Option<PathBuf> {
+fn get_debug_file(session_id: &str) -> Option<PathBuf> {
     let debug_dir = claude_debug_dir()?;
     let debug_file = debug_dir.join(format!("{}.txt", session_id));
     if debug_file.exists() {
@@ -150,13 +244,11 @@ struct JsonlMessage {
     content: Option<serde_json::Value>,
 }
 
-/// Get the last user prompt from history.jsonl for a session
-pub fn get_last_prompt_from_history(session_id: &str) -> Option<String> {
+fn get_last_prompt_from_history(session_id: &str) -> Option<String> {
     let history_file = claude_history_file()?;
     let file = fs::File::open(&history_file).ok()?;
     let file_size = file.metadata().ok()?.len();
 
-    // Read last ~50KB to find recent prompts
     let mut reader = BufReader::new(file);
     let start_pos = file_size.saturating_sub(50_000);
     reader.seek(SeekFrom::Start(start_pos)).ok()?;
@@ -183,23 +275,20 @@ pub fn get_last_prompt_from_history(session_id: &str) -> Option<String> {
     last_prompt
 }
 
-/// Parse context from the last few entries of a session JSONL
-pub fn parse_session_context(jsonl_path: &PathBuf) -> Result<SessionInfo> {
+fn parse_session_context(jsonl_path: &PathBuf) -> Result<RawSessionInfo> {
     let file = fs::File::open(jsonl_path).context("Failed to open JSONL file")?;
     let file_size = file.metadata()?.len();
 
-    // Read last ~100KB of the file to get recent entries
     let mut reader = BufReader::new(file);
     let start_pos = file_size.saturating_sub(100_000);
     reader.seek(SeekFrom::Start(start_pos))?;
 
-    // If we seeked into the middle, skip the partial first line
     if start_pos > 0 {
         let mut skip = String::new();
         reader.read_line(&mut skip)?;
     }
 
-    let mut info = SessionInfo::default();
+    let mut info = RawSessionInfo::default();
     let mut entries: Vec<JsonlEntry> = Vec::new();
 
     for line in reader.lines().flatten() {
@@ -211,7 +300,6 @@ pub fn parse_session_context(jsonl_path: &PathBuf) -> Result<SessionInfo> {
         }
     }
 
-    // Process entries in reverse to find most recent info
     for entry in entries.iter().rev() {
         if info.session_id.is_none() {
             info.session_id = entry.session_id.clone();
@@ -230,13 +318,11 @@ pub fn parse_session_context(jsonl_path: &PathBuf) -> Result<SessionInfo> {
                     for item in arr {
                         let item_type = item.get("type").and_then(|t| t.as_str());
 
-                        // Get last user prompt (actual text, not tool results)
                         if info.last_user_prompt.is_none()
                             && item_type == Some("text")
                             && msg.role.as_deref() == Some("user")
                         {
                             if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                                // Skip system messages
                                 if !text.starts_with('<') {
                                     info.last_user_prompt =
                                         Some(text.chars().take(150).collect());
@@ -244,7 +330,6 @@ pub fn parse_session_context(jsonl_path: &PathBuf) -> Result<SessionInfo> {
                             }
                         }
 
-                        // Get current/last tool
                         if info.current_tool.is_none() && item_type == Some("tool_use") {
                             if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
                                 info.current_tool = Some(name.to_string());
@@ -280,7 +365,6 @@ pub fn parse_session_context(jsonl_path: &PathBuf) -> Result<SessionInfo> {
             }
         }
 
-        // Stop once we have all the info we need
         if info.session_id.is_some()
             && info.last_user_prompt.is_some()
             && info.current_tool.is_some()
@@ -292,12 +376,10 @@ pub fn parse_session_context(jsonl_path: &PathBuf) -> Result<SessionInfo> {
     Ok(info)
 }
 
-/// Parse the debug log to determine if Claude is actively streaming or idle
-pub fn parse_debug_state(debug_path: &PathBuf) -> Result<(bool, bool)> {
+fn parse_debug_state(debug_path: &PathBuf) -> Result<(bool, bool)> {
     let file = fs::File::open(debug_path).context("Failed to open debug file")?;
     let file_size = file.metadata()?.len();
 
-    // Read last ~10KB to find recent events
     let mut reader = BufReader::new(file);
     let start_pos = file_size.saturating_sub(10_000);
     reader.seek(SeekFrom::Start(start_pos))?;
@@ -307,20 +389,19 @@ pub fn parse_debug_state(debug_path: &PathBuf) -> Result<(bool, bool)> {
         reader.read_line(&mut skip)?;
     }
 
-    let mut last_stream_time: Option<&str> = None;
-    let mut last_idle_time: Option<&str> = None;
+    let mut last_stream_time: Option<String> = None;
+    let mut last_idle_time: Option<String> = None;
     let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
 
     for line in lines.iter().rev().take(50) {
         if last_stream_time.is_none() && line.contains("Stream started") {
-            // Extract timestamp (first 24 chars typically)
             if line.len() >= 24 {
-                last_stream_time = Some(&line[..24]);
+                last_stream_time = Some(line[..24].to_string());
             }
         }
         if last_idle_time.is_none() && line.contains("idle_prompt") {
             if line.len() >= 24 {
-                last_idle_time = Some(&line[..24]);
+                last_idle_time = Some(line[..24].to_string());
             }
         }
         if last_stream_time.is_some() && last_idle_time.is_some() {
@@ -328,14 +409,13 @@ pub fn parse_debug_state(debug_path: &PathBuf) -> Result<(bool, bool)> {
         }
     }
 
-    // Determine state based on which event is more recent
-    let is_streaming = match (last_stream_time, last_idle_time) {
+    let is_streaming = match (&last_stream_time, &last_idle_time) {
         (Some(stream), Some(idle)) => stream > idle,
         (Some(_), None) => true,
         _ => false,
     };
 
-    let is_idle = match (last_stream_time, last_idle_time) {
+    let is_idle = match (&last_stream_time, &last_idle_time) {
         (Some(stream), Some(idle)) => idle > stream,
         (None, Some(_)) => true,
         _ => false,
@@ -344,19 +424,15 @@ pub fn parse_debug_state(debug_path: &PathBuf) -> Result<(bool, bool)> {
     Ok((is_streaming, is_idle))
 }
 
-/// Get full session info for a pane by TTY
-pub fn get_session_info_by_tty(tty: &str) -> Option<SessionInfo> {
+fn get_session_info_by_tty(tty: &str) -> Option<RawSessionInfo> {
     let pid = find_claude_pid_by_tty(tty)?;
     let cwd = get_process_cwd(pid)?;
     let jsonl_path = find_session_jsonl(&cwd)?;
 
     let mut info = parse_session_context(&jsonl_path).ok()?;
     info.cwd = Some(cwd);
-
-    // Calculate session cost from JSONL
     info.session_cost = pricing::calculate_session_cost(&jsonl_path);
 
-    // Get streaming/idle state from debug log, and last prompt from history
     if let Some(session_id) = &info.session_id {
         if let Some(debug_path) = get_debug_file(session_id) {
             if let Ok((is_streaming, is_idle)) = parse_debug_state(&debug_path) {
@@ -365,13 +441,108 @@ pub fn get_session_info_by_tty(tty: &str) -> Option<SessionInfo> {
             }
         }
 
-        // Get last user prompt from history.jsonl
         if info.last_user_prompt.is_none() {
             info.last_user_prompt = get_last_prompt_from_history(session_id);
         }
     }
 
     Some(info)
+}
+
+// ============================================================================
+// Content-based detection (fallback)
+// ============================================================================
+
+fn is_claude_code_session(content: &str) -> bool {
+    let indicators = ["⏺ ", "⎿", "✢", "⏵⏵", "Claude Code"];
+    indicators.iter().any(|i| content.contains(i))
+}
+
+fn detect_status_from_content(content: &str) -> SessionStatus {
+    if content.contains("esc to interrupt") {
+        SessionStatus::Working
+    } else if is_permission_prompt(content) {
+        SessionStatus::PermissionRequired
+    } else {
+        SessionStatus::WaitingForInput
+    }
+}
+
+fn is_permission_prompt(content: &str) -> bool {
+    let last_lines: String = content.lines().rev().take(20).collect::<Vec<_>>().join("\n");
+    let patterns = [
+        "Allow",
+        "Deny",
+        "Yes, allow",
+        "allow this",
+        "Yes, proceed",
+        "allow once",
+        "allow always",
+    ];
+    patterns.iter().any(|p| last_lines.contains(p))
+}
+
+fn extract_permission_detail(content: &str) -> Option<String> {
+    for line in content.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("⏺") {
+            let action = trimmed.trim_start_matches("⏺").trim();
+            if !action.is_empty() {
+                return Some(action.chars().take(60).collect());
+            }
+        }
+    }
+    Some("Tool permission".to_string())
+}
+
+fn extract_last_action(content: &str) -> Option<String> {
+    let last_marker_pos = content.rfind("⏺")?;
+    let after_marker = &content[last_marker_pos..];
+
+    let cleaned: Vec<&str> = after_marker
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .filter(|l| !l.chars().all(|c| c == '─'))
+        .filter(|l| !l.starts_with('>'))
+        .filter(|l| !l.contains("bypass permissions"))
+        .take(5)
+        .collect();
+
+    if cleaned.is_empty() {
+        return None;
+    }
+
+    let mut result = cleaned.join("\n");
+    if result.starts_with("⏺") {
+        result = result.trim_start_matches("⏺").trim().to_string();
+    }
+
+    Some(result)
+}
+
+fn extract_task_from_title(title: &str) -> Option<String> {
+    if !title.contains("✳") {
+        return None;
+    }
+    let task = title.trim_start_matches("✳").trim();
+
+    // Remove version number at end
+    if let Some(space_pos) = task.rfind(' ') {
+        let potential_version = &task[space_pos + 1..];
+        if potential_version.chars().all(|c| c.is_ascii_digit() || c == '.') {
+            let trimmed = task[..space_pos].trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    if task.is_empty() {
+        None
+    } else {
+        Some(task.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -384,15 +555,15 @@ mod tests {
             encode_path("/Users/jiwan/projects/test"),
             "-Users-jiwan-projects-test"
         );
-        // Underscores become dashes
         assert_eq!(
             encode_path("/Users/jiwan/projects/cua_project"),
             "-Users-jiwan-projects-cua-project"
         );
-        // Dots become dashes
-        assert_eq!(
-            encode_path("/Users/jiwan/.config/tmux"),
-            "-Users-jiwan--config-tmux"
-        );
+    }
+
+    #[test]
+    fn test_detect_claude_session() {
+        assert!(is_claude_code_session("⏺ Read(file.txt)"));
+        assert!(!is_claude_code_session("$ ls -la"));
     }
 }

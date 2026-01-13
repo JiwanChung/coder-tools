@@ -199,7 +199,7 @@ fn render_grouped_items(app: &App, panes: &[&crate::app::PaneState], selected_in
             Status::WaitingForInput => (Color::Green, ">_"),
             Status::PermissionRequired => (Color::Red, "⚠ "),
             Status::Working => (Color::Yellow, "◐ "),
-            Status::NotClaudeCode => (Color::DarkGray, "--"),
+            Status::NotDetected => (Color::DarkGray, "--"),
         };
 
         let (_, folder_name) = split_path(&pane_state.pane.current_path);
@@ -263,7 +263,7 @@ fn render_compact_items(panes: &[&crate::app::PaneState], selected_index: usize)
                 Status::WaitingForInput => (Color::Green, ">_"),
                 Status::PermissionRequired => (Color::Red, "⚠ "),
                 Status::Working => (Color::Yellow, "◐ "),
-                Status::NotClaudeCode => (Color::DarkGray, "--"),
+                Status::NotDetected => (Color::DarkGray, "--"),
             };
 
             // Get just the folder name for compact view
@@ -329,7 +329,7 @@ fn render_full_items(panes: &[&crate::app::PaneState], selected_index: usize) ->
                 Status::WaitingForInput => (Color::Green, ">_"),
                 Status::PermissionRequired => (Color::Red, "⚠ "),
                 Status::Working => (Color::Yellow, "◐ "),
-                Status::NotClaudeCode => (Color::DarkGray, "--"),
+                Status::NotDetected => (Color::DarkGray, "--"),
             };
 
             // Shorten path for display and split into parent + folder name

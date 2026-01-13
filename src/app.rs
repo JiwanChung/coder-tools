@@ -141,7 +141,7 @@ impl App {
                         Status::Working => existing.stats.total_working_secs += elapsed_secs,
                         Status::WaitingForInput => existing.stats.total_waiting_secs += elapsed_secs,
                         Status::PermissionRequired => existing.stats.total_permission_secs += elapsed_secs,
-                        Status::NotClaudeCode => {}
+                        Status::NotDetected => {}
                     }
                     existing.stats.state_changes += 1;
 
@@ -199,7 +199,7 @@ impl App {
         let mut panes: Vec<&PaneState> = self
             .pane_states
             .values()
-            .filter(|p| self.show_all_panes || p.status.status != Status::NotClaudeCode)
+            .filter(|p| self.show_all_panes || p.status.status != Status::NotDetected)
             .filter(|p| {
                 match self.status_filter {
                     Some(filter) => p.status.status == filter,
@@ -214,7 +214,7 @@ impl App {
                 Status::PermissionRequired => 0,
                 Status::Working => 1,
                 Status::WaitingForInput => 2,
-                Status::NotClaudeCode => 3,
+                Status::NotDetected => 3,
             };
 
             status_order(a.status.status)
@@ -297,7 +297,7 @@ impl App {
                 Status::Working => stats.total_working_secs += current_secs,
                 Status::WaitingForInput => stats.total_waiting_secs += current_secs,
                 Status::PermissionRequired => stats.total_permission_secs += current_secs,
-                Status::NotClaudeCode => {}
+                Status::NotDetected => {}
             }
         }
 
@@ -421,7 +421,7 @@ impl App {
                     Status::Working => working += current_secs,
                     Status::WaitingForInput => waiting += current_secs,
                     Status::PermissionRequired => permission += current_secs,
-                    Status::NotClaudeCode => {}
+                    Status::NotDetected => {}
                 }
 
                 ExportPane {

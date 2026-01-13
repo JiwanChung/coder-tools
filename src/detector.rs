@@ -1,6 +1,13 @@
-use crate::claude_session::{self, SessionInfo};
+//! AI coding session detection
+//!
+//! This module provides a unified interface for detecting AI coding sessions
+//! across different providers (Claude, OpenAI, Gemini, etc.)
+
+use crate::pricing::SessionCost;
+use crate::providers::{ProviderKind, ProviderRegistry, SessionInfo, SessionStatus};
 use std::fmt;
 
+/// Status of an AI coding session (for backwards compatibility)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     /// Waiting for user input
@@ -9,8 +16,8 @@ pub enum Status {
     PermissionRequired,
     /// Actively working (thinking, tool execution)
     Working,
-    /// Not a Claude Code session
-    NotClaudeCode,
+    /// Not a recognized AI session
+    NotDetected,
 }
 
 impl Status {
@@ -19,7 +26,7 @@ impl Status {
             Status::WaitingForInput => ">_",
             Status::PermissionRequired => "⚠",
             Status::Working => "◐",
-            Status::NotClaudeCode => "--",
+            Status::NotDetected => "--",
         }
     }
 
@@ -28,8 +35,14 @@ impl Status {
             Status::WaitingForInput => "Waiting for input",
             Status::PermissionRequired => "Permission required",
             Status::Working => "Working",
-            Status::NotClaudeCode => "Not Claude Code",
+            Status::NotDetected => "Not detected",
         }
+    }
+}
+
+impl Default for Status {
+    fn default() -> Self {
+        Status::NotDetected
     }
 }
 
@@ -39,11 +52,23 @@ impl fmt::Display for Status {
     }
 }
 
-use crate::pricing::SessionCost;
+impl From<SessionStatus> for Status {
+    fn from(status: SessionStatus) -> Self {
+        match status {
+            SessionStatus::WaitingForInput => Status::WaitingForInput,
+            SessionStatus::PermissionRequired => Status::PermissionRequired,
+            SessionStatus::Working => Status::Working,
+            SessionStatus::NotDetected => Status::NotDetected,
+        }
+    }
+}
 
+/// Detection result with status and context
 #[derive(Debug, Clone, Default)]
 pub struct DetectionResult {
     pub status: Status,
+    #[allow(dead_code)]
+    pub provider: ProviderKind,
     pub detail: Option<String>,
     pub tokens: Option<String>,
     // Rich context from session files
@@ -58,216 +83,120 @@ pub struct DetectionResult {
     pub session_cost: Option<SessionCost>,
 }
 
-impl Default for Status {
-    fn default() -> Self {
-        Status::NotClaudeCode
+impl From<SessionInfo> for DetectionResult {
+    fn from(info: SessionInfo) -> Self {
+        DetectionResult {
+            status: info.status.into(),
+            provider: info.provider,
+            detail: info.detail,
+            tokens: None, // Set separately from screen scraping
+            last_user_prompt: info.last_user_prompt,
+            current_tool: info.current_tool,
+            tool_detail: info.tool_detail,
+            model: info.model,
+            pane_task: info.task,
+            session_cost: info.cost,
+        }
     }
 }
 
-/// Detect Claude Code status using robust signals:
-/// 1. Pane title (✳ marker) for Claude Code detection
-/// 2. Session files for context (tool, prompt)
-/// 3. Debug log for status (idle_prompt vs Stream started)
-/// 4. Screen content only for permission detection
-pub fn detect_status_from_session(tty: &str, content: &str, pane_title: Option<&str>) -> DetectionResult {
-    // Check if this is a Claude Code session via pane title
-    let is_claude = pane_title.map(|t| t.contains("✳")).unwrap_or(false);
+/// Global provider registry (lazy initialized)
+fn get_registry() -> &'static ProviderRegistry {
+    use std::sync::OnceLock;
+    static REGISTRY: OnceLock<ProviderRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(ProviderRegistry::new)
+}
 
-    // Extract task from pane title
-    let pane_task = pane_title.and_then(|title| extract_task_from_title(title));
+/// Detect AI coding session status using the provider system
+pub fn detect_status_from_session(
+    tty: &str,
+    content: &str,
+    pane_title: Option<&str>,
+) -> DetectionResult {
+    let registry = get_registry();
+    let title = pane_title.unwrap_or("");
 
-    // If not Claude Code by title, check if we can find a Claude process
-    if !is_claude {
-        // Try to find Claude process - if found, it's Claude Code
-        if let Some(session_info) = claude_session::get_session_info_by_tty(tty) {
-            let mut result = detect_from_session_info(session_info, content);
-            result.pane_task = pane_task;
-            return result;
-        }
-        // No Claude process and no ✳ in title - not Claude Code
-        return DetectionResult {
-            status: Status::NotClaudeCode,
-            ..Default::default()
-        };
-    }
+    // Use provider registry to detect and get session info
+    let info = registry.get_session_info(tty, title, content);
 
-    // It's Claude Code - get session info for context and status
-    if let Some(session_info) = claude_session::get_session_info_by_tty(tty) {
-        let mut result = detect_from_session_info(session_info, content);
-        result.pane_task = pane_task;
-        return result;
-    }
+    let mut result = DetectionResult::from(info);
 
-    // Claude Code by title but no process found - likely idle/completed
-    // Use screen content as fallback for status
-    let mut result = detect_status(content);
-    result.pane_task = pane_task;
+    // Extract tokens from screen content (provider-agnostic)
+    result.tokens = extract_tokens(content);
+
     result
 }
 
-/// Extract task description from Claude Code pane title
-/// Title format: "✳ Task Description 2.1.5"
-fn extract_task_from_title(title: &str) -> Option<String> {
-    if !title.contains("✳") {
-        return None;
-    }
-    let task = title.trim_start_matches("✳").trim();
-    // Remove version number at end (e.g., "2.1.5")
-    if let Some(space_pos) = task.rfind(' ') {
-        let potential_version = &task[space_pos + 1..];
-        if potential_version.chars().all(|c| c.is_ascii_digit() || c == '.') {
-            let trimmed = task[..space_pos].trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-    if task.is_empty() {
-        None
-    } else {
-        Some(task.to_string())
-    }
-}
-
-/// Convert SessionInfo to DetectionResult
-fn detect_from_session_info(info: SessionInfo, content: &str) -> DetectionResult {
-    // Determine status primarily from debug log signals
-    let status = if info.is_streaming {
-        // Debug log shows active streaming - definitely working
-        Status::Working
-    } else if info.is_idle {
-        // Debug log shows idle_prompt - check for permission prompt on screen
-        // (permission prompts happen when idle, waiting for user approval)
-        if is_permission_prompt(content) {
-            Status::PermissionRequired
-        } else {
-            Status::WaitingForInput
-        }
-    } else {
-        // No clear signal from debug log - check stop_reason from JSONL
-        match info.stop_reason.as_deref() {
-            Some("tool_use") => {
-                // Last message was tool_use - either running or waiting for permission
-                if is_permission_prompt(content) {
-                    Status::PermissionRequired
-                } else {
-                    Status::Working
-                }
-            }
-            Some("end_turn") => Status::WaitingForInput,
-            _ => {
-                // Fallback: use screen content
-                if content.contains("esc to interrupt") {
-                    Status::Working
-                } else if is_permission_prompt(content) {
-                    Status::PermissionRequired
-                } else {
-                    Status::WaitingForInput
-                }
-            }
-        }
-    };
-
-    // Build detail string
-    let detail = if status == Status::Working {
-        // Show what tool is running
-        match (&info.current_tool, &info.tool_detail) {
-            (Some(tool), Some(detail)) => Some(format!("{}: {}", tool, detail)),
-            (Some(tool), None) => Some(tool.clone()),
-            _ => info.last_user_prompt.clone(),
-        }
-    } else if status == Status::PermissionRequired {
-        extract_permission_detail(content)
-    } else {
-        // Show last action when waiting
-        info.last_user_prompt.clone().or_else(|| extract_last_action(content))
-    };
-
-    DetectionResult {
-        status,
-        detail,
-        tokens: extract_tokens(content),
-        last_user_prompt: info.last_user_prompt,
-        current_tool: info.current_tool,
-        tool_detail: info.tool_detail,
-        model: info.model,
-        pane_task: None, // Set by caller
-        session_cost: info.session_cost,
-    }
-}
-
-/// Detect Claude Code status from pane content (fallback method)
+/// Detect status from screen content only (fallback, provider-agnostic)
+#[allow(dead_code)]
 pub fn detect_status(content: &str) -> DetectionResult {
-    // Check if this looks like Claude Code at all
-    if !is_claude_code_session(content) {
+    // Check for common AI CLI indicators
+    if is_ai_session(content) {
+        if content.contains("esc to interrupt") {
+            return DetectionResult {
+                status: Status::Working,
+                tokens: extract_tokens(content),
+                detail: extract_last_user_command(content),
+                ..Default::default()
+            };
+        }
+
+        if is_permission_prompt(content) {
+            return DetectionResult {
+                status: Status::PermissionRequired,
+                detail: extract_permission_detail(content),
+                ..Default::default()
+            };
+        }
+
         return DetectionResult {
-            status: Status::NotClaudeCode,
+            status: Status::WaitingForInput,
+            detail: extract_last_action(content),
             ..Default::default()
         };
     }
-
-    // Simple sentinel: "esc to interrupt" means Claude is working
-    if content.contains("esc to interrupt") {
-        let tokens = extract_tokens(content);
-        let last_command = extract_last_user_command(content);
-        return DetectionResult {
-            status: Status::Working,
-            detail: last_command,
-            tokens,
-            ..Default::default()
-        };
-    }
-
-    // Check for permission prompts
-    if is_permission_prompt(content) {
-        let permission_detail = extract_permission_detail(content);
-        return DetectionResult {
-            status: Status::PermissionRequired,
-            detail: permission_detail,
-            ..Default::default()
-        };
-    }
-
-    // Otherwise, Claude is waiting for input
-    // Extract last action (line starting with ⏺)
-    let last_action = extract_last_action(content);
 
     DetectionResult {
-        status: Status::WaitingForInput,
-        detail: last_action,
+        status: Status::NotDetected,
         ..Default::default()
     }
 }
 
-/// Check if content shows a permission prompt
-fn is_permission_prompt(content: &str) -> bool {
-    // Look for permission-related patterns in the last portion of content
-    let last_lines: String = content.lines().rev().take(20).collect::<Vec<_>>().join("\n");
+// ============================================================================
+// Screen content extraction helpers (provider-agnostic)
+// ============================================================================
 
-    // Claude Code permission patterns
-    let patterns = [
-        "Allow",           // Permission button
-        "Deny",            // Permission button
-        "Yes, allow",      // Yes option
-        "allow this",      // Allow this action
-        "Yes, proceed",    // Yes proceed
-        "allow once",      // Allow once
-        "allow always",    // Allow always
+#[allow(dead_code)]
+fn is_ai_session(content: &str) -> bool {
+    // Common AI CLI indicators
+    let indicators = [
+        "⏺ ",        // Claude tool marker
+        "⎿",         // Claude output marker
+        "✢",         // Claude thinking
+        "⏵⏵",       // Claude permission mode
+        "Claude Code",
+        // Add more provider indicators here
     ];
-
-    for pattern in &patterns {
-        if last_lines.contains(pattern) {
-            return true;
-        }
-    }
-
-    false
+    indicators.iter().any(|i| content.contains(i))
 }
 
-/// Extract what permission is being requested
+#[allow(dead_code)]
+fn is_permission_prompt(content: &str) -> bool {
+    let last_lines: String = content.lines().rev().take(20).collect::<Vec<_>>().join("\n");
+    let patterns = [
+        "Allow",
+        "Deny",
+        "Yes, allow",
+        "allow this",
+        "Yes, proceed",
+        "allow once",
+        "allow always",
+    ];
+    patterns.iter().any(|p| last_lines.contains(p))
+}
+
+#[allow(dead_code)]
 fn extract_permission_detail(content: &str) -> Option<String> {
-    // Find the tool/action that's requesting permission
-    // Usually appears after ⏺ marker
     for line in content.lines().rev() {
         let trimmed = line.trim();
         if trimmed.starts_with("⏺") {
@@ -280,20 +209,14 @@ fn extract_permission_detail(content: &str) -> Option<String> {
     Some("Tool permission".to_string())
 }
 
-/// Extract token count from thinking indicator (e.g., "↓ 7.0k tokens")
 fn extract_tokens(content: &str) -> Option<String> {
-    // Look for pattern like "↓ 7.0k tokens" or "↓ 1.2k tokens"
     for line in content.lines().rev() {
         if line.contains("tokens") && line.contains("↓") {
-            // Find the token count pattern
             if let Some(pos) = line.find("↓") {
                 let after = &line[pos..];
-                // Skip the ↓ character (3 bytes in UTF-8) and any space
                 let arrow_len = "↓".len();
                 if after.len() > arrow_len {
-                    let rest = &after[arrow_len..];
-                    let rest = rest.trim_start();
-                    // Extract until "tokens"
+                    let rest = &after[arrow_len..].trim_start();
                     if let Some(end) = rest.find("tokens") {
                         let token_part = rest[..end].trim();
                         return Some(format!("{}tokens", token_part));
@@ -305,46 +228,34 @@ fn extract_tokens(content: &str) -> Option<String> {
     None
 }
 
-/// Extract the last user command (text after > prompt)
 fn extract_last_user_command(content: &str) -> Option<String> {
     let lines: Vec<&str> = content.lines().collect();
-
-    // Find lines that start with > (user prompt)
-    // The user's command follows immediately after
     let mut command_lines: Vec<&str> = Vec::new();
     let mut in_command = false;
 
     for line in &lines {
         let trimmed = line.trim();
 
-        // Skip empty lines and separator lines
         if trimmed.is_empty() || trimmed.chars().all(|c| c == '─') {
             if in_command && !command_lines.is_empty() {
-                // End of command block
                 break;
             }
             continue;
         }
 
-        // Check if this is a prompt line
         if trimmed == ">" || trimmed.starts_with("> ") {
-            // Reset - new command starting
             command_lines.clear();
             in_command = true;
-
-            // If there's text after >, capture it
             if trimmed.len() > 2 {
                 command_lines.push(&trimmed[2..]);
             }
             continue;
         }
 
-        // If we're in a command and hit a Claude response marker, stop
         if in_command && (trimmed.starts_with("⏺") || trimmed.starts_with("✢")) {
             break;
         }
 
-        // If we're in a command, collect the line
         if in_command {
             command_lines.push(trimmed);
         }
@@ -354,7 +265,6 @@ fn extract_last_user_command(content: &str) -> Option<String> {
         return None;
     }
 
-    // Join and truncate
     let result = command_lines.join(" ");
     let truncated: String = result.chars().take(80).collect();
 
@@ -365,30 +275,24 @@ fn extract_last_user_command(content: &str) -> Option<String> {
     }
 }
 
-/// Extract everything after the last ⏺ marker
 fn extract_last_action(content: &str) -> Option<String> {
-    // Find the last occurrence of ⏺
     let last_marker_pos = content.rfind("⏺")?;
-
-    // Get everything from that marker onwards
     let after_marker = &content[last_marker_pos..];
 
-    // Clean up: remove the ⏺ itself, trim, and limit lines
     let cleaned: Vec<&str> = after_marker
         .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
-        .filter(|l| !l.chars().all(|c| c == '─')) // Skip separator lines
-        .filter(|l| !l.starts_with('>')) // Skip prompt lines
-        .filter(|l| !l.contains("bypass permissions")) // Skip permission indicator
-        .take(5) // Limit to 5 lines
+        .filter(|l| !l.chars().all(|c| c == '─'))
+        .filter(|l| !l.starts_with('>'))
+        .filter(|l| !l.contains("bypass permissions"))
+        .take(5)
         .collect();
 
     if cleaned.is_empty() {
         return None;
     }
 
-    // Join with newlines, removing the ⏺ prefix from first line
     let mut result = cleaned.join("\n");
     if result.starts_with("⏺") {
         result = result.trim_start_matches("⏺").trim().to_string();
@@ -397,34 +301,15 @@ fn extract_last_action(content: &str) -> Option<String> {
     Some(result)
 }
 
-fn is_claude_code_session(content: &str) -> bool {
-    // Claude Code specific UI elements
-    let indicators = [
-        "⏺ ",       // Tool call marker
-        "⎿",        // Tool output marker
-        "✢",        // Thinking indicator
-        "⏵⏵",      // Permission mode indicator
-        "Claude Code",
-    ];
-
-    for indicator in &indicators {
-        if content.contains(indicator) {
-            return true;
-        }
-    }
-
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_detect_not_claude_code() {
+    fn test_detect_not_ai_session() {
         let content = "$ ls -la\ntotal 0\ndrwxr-xr-x  2 user  staff  64 Dec 23 10:00 .";
         let result = detect_status(content);
-        assert_eq!(result.status, Status::NotClaudeCode);
+        assert_eq!(result.status, Status::NotDetected);
     }
 
     #[test]
@@ -442,8 +327,8 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_code_detection() {
-        let content = "⏺ Bash(ls -la)\n  ⎿  total 0";
-        assert!(is_claude_code_session(content));
+    fn test_status_conversion() {
+        assert_eq!(Status::from(SessionStatus::Working), Status::Working);
+        assert_eq!(Status::from(SessionStatus::WaitingForInput), Status::WaitingForInput);
     }
 }

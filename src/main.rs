@@ -1,9 +1,9 @@
 mod app;
 mod budget;
-mod claude_session;
 mod detector;
 mod notify;
 mod pricing;
+mod providers;
 mod resume;
 mod sync;
 mod tmux;
