@@ -2,6 +2,7 @@ mod app;
 mod budget;
 mod cost;
 mod detector;
+mod hooks;
 mod notify;
 mod resume;
 mod sync;
@@ -98,6 +99,11 @@ fn run_monitor(
     notify_enabled: bool,
     jump_enabled: bool,
 ) -> Result<()> {
+    // Auto-inject hooks if missing
+    if let Err(e) = hooks::ensure_hooks_installed() {
+        eprintln!("Warning: Failed to check/install hooks: {}", e);
+    }
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();

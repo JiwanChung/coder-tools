@@ -9,13 +9,13 @@
 
 ## Overview
 
-`coder-tools` helps you manage multiple AI coding sessions across tmux panes:
+Run multiple AI coding agents (Claude, Gemini, Codex) in tmux and manage them from a single dashboard.
 
-- **Monitor** Claude, Gemini, and Codex sessions in real-time
-- **Track** token usage and costs
-- **Resume** previous Claude Code sessions
-- **Sync** your `CLAUDE.md` guidelines across projects
-- **Budget** token usage with daily/weekly/monthly limits
+- **See all sessions at a glance** — which are working, waiting, or need permission
+- **Jump to any pane** — press Enter to switch to the selected session
+- **Approve permissions remotely** — press `y` to send approval without switching panes
+- **Get notified** — desktop notifications when an agent finishes or needs attention
+- **Track costs** — see token usage and estimated costs per session
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -39,7 +39,6 @@
 ## Installation
 
 ```bash
-# From source
 git clone https://github.com/JiwanChung/coder-tools.git
 cd coder-tools
 cargo install --path .
@@ -53,42 +52,11 @@ cargo install --path .
 
 ## Quick Start
 
-### 1. Configure Hooks
-
-The monitor uses tmux pane options published by agent hooks. Add to your settings:
-
-**Claude Code** (`~/.claude/settings.json`):
-```json
-{
-  "hooks": {
-    "UserPromptSubmit": [{
-      "hooks": [{
-        "type": "command",
-        "command": "bash -c 'TASK=$(jq -r \".prompt // empty\" | tr \"\\n\" \" \" | head -c 100); tmux set -p @agent_provider claude \\; set -p @agent_task \"$TASK\" \\; set -p @agent_status working 2>/dev/null'"
-      }]
-    }],
-    "Stop": [{ "hooks": [{ "type": "command", "command": "tmux set -p @agent_status waiting 2>/dev/null" }] }],
-    "PermissionRequest": [{ "hooks": [{ "type": "command", "command": "tmux set -p @agent_status permission 2>/dev/null" }] }]
-  }
-}
-```
-
-**Gemini CLI** (`~/.gemini/settings.json`):
-```json
-{
-  "experiments": { "enableHooks": true },
-  "hooks": {
-    "BeforeAgent": [{ "hooks": [{ "type": "command", "command": "tmux set -p @agent_provider gemini \\; set -p @agent_status working 2>/dev/null" }] }],
-    "AfterAgent": [{ "hooks": [{ "type": "command", "command": "tmux set -p @agent_status waiting 2>/dev/null" }] }]
-  }
-}
-```
-
-### 2. Run Monitor
-
 ```bash
 coder-tools monitor
 ```
+
+On first run, it automatically configures Claude Code and Gemini CLI to report their status. Just run the command and start your agents in tmux panes.
 
 ## Commands
 
@@ -96,22 +64,22 @@ coder-tools monitor
 
 ```bash
 coder-tools monitor              # Default: 2s refresh
-coder-tools monitor -a           # Show all panes
-coder-tools monitor -n           # Enable notifications
-coder-tools monitor -j           # Auto-jump to ready panes
+coder-tools monitor -a           # Show all panes (including non-agent)
+coder-tools monitor -n           # Enable desktop notifications
+coder-tools monitor -j           # Auto-jump when an agent becomes ready
 ```
 
 **Keybindings:**
 | Key | Action |
 |-----|--------|
 | `q` | Quit |
-| `↑↓` / `jk` | Navigate |
-| `Enter` | Jump to pane |
+| `↑↓` / `jk` | Navigate sessions |
+| `Enter` | Jump to selected pane |
 | `y` | Approve permission (sends 'y' + Enter) |
 | `$` | Fetch token/cost data |
 | `s` | Toggle stats view |
-| `g` | Group by session |
-| `w` / `i` | Filter working / waiting |
+| `g` | Group by tmux session |
+| `w` / `i` | Filter by working / waiting |
 | `a` | Show all panes |
 | `c` | Compact mode |
 
@@ -119,15 +87,19 @@ coder-tools monitor -j           # Auto-jump to ready panes
 
 ### `budget` — Token Usage Tracking
 
+Set limits and track spending across all your sessions.
+
 ```bash
 coder-tools budget status                    # Current usage
-coder-tools budget set --daily 100k          # Set limits
+coder-tools budget set --daily 100k          # Set daily limit
 coder-tools budget report                    # Detailed breakdown
 ```
 
 ---
 
 ### `resume` — Session History
+
+List and restore previous Claude Code sessions.
 
 ```bash
 coder-tools resume list          # List recent sessions
@@ -138,32 +110,21 @@ coder-tools resume show 1        # Show session details
 
 ### `sync` — CLAUDE.md Management
 
+Keep your `CLAUDE.md` guidelines in sync across projects.
+
 ```bash
-coder-tools sync push ~/projects/*    # Sync guidelines
+coder-tools sync push ~/projects/*    # Push to all projects
 coder-tools sync status ~/projects/*  # Check sync status
 ```
 
-## How It Works
+## Supported Agents
 
-`coder-tools` is entirely local—no API calls:
-
-- **Monitor**: Reads tmux pane options (`@agent_provider`, `@agent_status`) published by hooks
-- **Cost**: Parses JSONL session logs from `~/.claude/projects/`
-- **Budget**: Aggregates token usage from session logs
-
-### Why Hooks?
-
-Previous versions used screen scraping and process detection, which caused tmux server issues. Hook-based detection is:
-- **Fast**: Single `tmux list-panes` call vs 40+ subprocess calls
-- **Accurate**: Agents report their own state
-- **Safe**: No risk of wedging tmux
+| Agent | Status Detection | Cost Tracking |
+|-------|------------------|---------------|
+| Claude Code | Working, Waiting, Permission | Yes |
+| Gemini CLI | Working, Waiting | No |
+| Codex CLI | Via wrapper script | No |
 
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
-
----
-
-<p align="center">
-  <sub>Built for Claude Code, Gemini CLI, and Codex</sub>
-</p>
