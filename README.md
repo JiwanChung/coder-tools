@@ -1,249 +1,169 @@
-# claude-tools
+# coder-tools
 
-**A powerful CLI toolkit for managing Claude Code sessions, workflows, and resources.**
+**A CLI toolkit for monitoring and managing AI coding assistant sessions.**
 
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 ---
 
 ## Overview
 
-`claude-tools` is a companion CLI for [Claude Code](https://claude.ai/claude-code) that helps you:
+`coder-tools` helps you manage multiple AI coding sessions across tmux panes:
 
-- **Monitor** multiple Claude Code sessions across tmux panes in real-time
-- **Resume** previous sessions with full context
+- **Monitor** Claude, Gemini, and Codex sessions in real-time
+- **Track** token usage and costs
+- **Resume** previous Claude Code sessions
 - **Sync** your `CLAUDE.md` guidelines across projects
-- **Track** token usage and set budget limits
+- **Budget** token usage with daily/weekly/monthly limits
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│ Claude Code Monitor                              q:quit r:refresh│
-├─────────────────────────────────────────────────────────────────┤
-│ ▶ Session: dev (3 panes)                                        │
-│   ├─ myapp          ⏳ Waiting    12.5k tokens   5m ago         │
-│   ├─ api-server     🔄 Working    8.2k tokens    Edit: user.rs  │
-│   └─ docs           ⚠️  Permission               Bash: rm -rf   │
-├─────────────────────────────────────────────────────────────────┤
-│ ▶ Session: work (2 panes)                                       │
-│   ├─ backend        ⏳ Waiting    45.1k tokens   2h ago         │
-│   └─ frontend       🔄 Working    22.3k tokens   Read: App.tsx  │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  Agent Monitor  | 5 sessions                                 │
+│  >_ 2 waiting   ◐ 2 working   ⚠ 1 permission                │
+├──────────────────────────────────────────────────────────────┤
+│  >_ coder-tools [claude] base:1.0  ~/projects/               │
+│     Waiting for input 5m23s  125.3k tokens  $0.42            │
+│                                                              │
+│  ◐  myapp [claude] base:2.1  ~/projects/                     │
+│     Working 2m15s                                            │
+│     > Add dark mode toggle to settings page                  │
+│                                                              │
+│  ⚠  api-server [gemini] base:3.0  ~/projects/                │
+│     Permission required 30s                                  │
+└──────────────────────────────────────────────────────────────┘
+│  q quit   ↑↓ nav   ⏎ jump   y yes   $ cost   s stats        │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ## Installation
 
-### Using Cargo
-
 ```bash
-cargo install --git https://github.com/JiwanChung/claude-tools
-```
-
-### From source
-
-```bash
-git clone https://github.com/JiwanChung/claude-tools.git
-cd claude-tools
+# From source
+git clone https://github.com/JiwanChung/coder-tools.git
+cd coder-tools
 cargo install --path .
 ```
 
 ### Requirements
 
 - Rust 1.70+
-- tmux (for monitor feature)
+- tmux
 - macOS or Linux
+
+## Quick Start
+
+### 1. Configure Hooks
+
+The monitor uses tmux pane options published by agent hooks. Add to your settings:
+
+**Claude Code** (`~/.claude/settings.json`):
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{
+      "hooks": [{
+        "type": "command",
+        "command": "bash -c 'TASK=$(jq -r \".prompt // empty\" | tr \"\\n\" \" \" | head -c 100); tmux set -p @agent_provider claude \\; set -p @agent_task \"$TASK\" \\; set -p @agent_status working 2>/dev/null'"
+      }]
+    }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "tmux set -p @agent_status waiting 2>/dev/null" }] }],
+    "PermissionRequest": [{ "hooks": [{ "type": "command", "command": "tmux set -p @agent_status permission 2>/dev/null" }] }]
+  }
+}
+```
+
+**Gemini CLI** (`~/.gemini/settings.json`):
+```json
+{
+  "experiments": { "enableHooks": true },
+  "hooks": {
+    "BeforeAgent": [{ "hooks": [{ "type": "command", "command": "tmux set -p @agent_provider gemini \\; set -p @agent_status working 2>/dev/null" }] }],
+    "AfterAgent": [{ "hooks": [{ "type": "command", "command": "tmux set -p @agent_status waiting 2>/dev/null" }] }]
+  }
+}
+```
+
+### 2. Run Monitor
+
+```bash
+coder-tools monitor
+```
 
 ## Commands
 
-### `monitor` — Real-time Session Dashboard
-
-Monitor all Claude Code sessions running in tmux panes with a beautiful TUI.
+### `monitor` — Real-time Dashboard
 
 ```bash
-claude-tools monitor
-```
-
-**Features:**
-- Live status detection: Waiting, Working, Permission Required
-- Session grouping with collapsible sections
-- Token count and timing statistics
-- Desktop notifications on state changes
-- Auto-jump to panes needing attention
-- Quick approval with `y` key
-
-**Options:**
-```
--i, --interval <SECS>   Refresh interval [default: 2]
--l, --lines <NUM>       Lines to capture per pane [default: 100]
--a, --all               Show all panes, not just Claude Code
--c, --compact           Compact single-line view
--n, --notify            Enable desktop notifications
--j, --jump              Auto-jump to ready panes
+coder-tools monitor              # Default: 2s refresh
+coder-tools monitor -a           # Show all panes
+coder-tools monitor -n           # Enable notifications
+coder-tools monitor -j           # Auto-jump to ready panes
 ```
 
 **Keybindings:**
 | Key | Action |
 |-----|--------|
-| `q` / `Esc` | Quit |
-| `r` | Refresh |
-| `j` / `↓` | Select next |
-| `k` / `↑` | Select previous |
+| `q` | Quit |
+| `↑↓` / `jk` | Navigate |
 | `Enter` | Jump to pane |
-| `y` | Approve permission |
-| `g` | Toggle session grouping |
-| `Tab` | Collapse/expand session |
+| `y` | Approve permission (sends 'y' + Enter) |
+| `$` | Fetch token/cost data |
 | `s` | Toggle stats view |
-| `e` | Export stats to JSON |
-| `w` | Filter: working only |
-| `i` | Filter: waiting only |
+| `g` | Group by session |
+| `w` / `i` | Filter working / waiting |
 | `a` | Show all panes |
-| `c` | Toggle compact mode |
+| `c` | Compact mode |
+
+---
+
+### `budget` — Token Usage Tracking
+
+```bash
+coder-tools budget status                    # Current usage
+coder-tools budget set --daily 100k          # Set limits
+coder-tools budget report                    # Detailed breakdown
+```
 
 ---
 
 ### `resume` — Session History
 
-List, view, and restore previous Claude Code sessions.
-
 ```bash
-# List recent sessions
-claude-tools resume list
-
-# Show session details
-claude-tools resume show 1
-
-# Get project directory
-claude-tools resume open 3
-```
-
-**Output:**
-```
-#    Project              Last Modified                  Messages
-----------------------------------------------------------------------
-1    myapp                5 minutes ago                  142
-     └─ Add dark mode toggle to settings page
-2    api-server           2 hours ago                    89
-     └─ Fix authentication middleware
-3    docs                 1 days ago                     34
-     └─ Update API documentation
+coder-tools resume list          # List recent sessions
+coder-tools resume show 1        # Show session details
 ```
 
 ---
 
 ### `sync` — CLAUDE.md Management
 
-Keep your `CLAUDE.md` project guidelines synchronized across repositories.
-
 ```bash
-# Initialize a master template
-claude-tools sync init
-
-# Push to all projects (prepends by default)
-claude-tools sync push ~/projects/*
-
-# Check sync status
-claude-tools sync status ~/projects/*
-
-# View differences
-claude-tools sync diff ~/.claude/CLAUDE.md ~/myapp/CLAUDE.md
-```
-
-**Strategies:**
-| Strategy | Description |
-|----------|-------------|
-| `prepend` | Add global guidelines before project-specific content (default) |
-| `append` | Add global guidelines after project-specific content |
-| `replace` | Overwrite with global guidelines |
-
-```bash
-# Explicit strategy
-claude-tools sync push -m replace ~/projects/*
-
-# Dry run to preview changes
-claude-tools sync push --dry-run ~/projects/*
-```
-
----
-
-### `budget` — Token Usage Tracking
-
-Monitor and limit your Claude Code token consumption.
-
-```bash
-# View current usage
-claude-tools budget status
-
-# Set limits
-claude-tools budget set --daily 500k --weekly 2m --monthly 10m
-
-# Detailed report
-claude-tools budget report --days 30 --group-by project
-```
-
-**Output:**
-```
-Token Usage Status
-==================================================
-
-Current Usage (last 30 days):
-  Input tokens:  701.5k
-  Output tokens: 2.6M
-  Total:         3.3M
-  Sessions:      136
-
-Budget Limits:
-  Daily:   450.2k/500k (90%) OK
-  Weekly:  1.8M/2M (90%) OK
-  Monthly: 3.3M/10M (33%) OK
-```
-
-**Limit formats:** `100k`, `1.5m`, `1000000`
-
----
-
-## Configuration
-
-Configuration is stored in `~/.claude/`:
-
-```
-~/.claude/
-├── CLAUDE.md          # Master project guidelines
-├── budget.json        # Budget limits
-└── projects/          # Session history (auto-generated by Claude Code)
-    └── <project>/
-        └── <session>.jsonl
+coder-tools sync push ~/projects/*    # Sync guidelines
+coder-tools sync status ~/projects/*  # Check sync status
 ```
 
 ## How It Works
 
-`claude-tools` is entirely local and doesn't make any API calls:
+`coder-tools` is entirely local—no API calls:
 
-- **Monitor**: Reads tmux pane content via `tmux capture-pane`
-- **Resume**: Parses JSONL session logs from `~/.claude/projects/`
-- **Sync**: Manages `CLAUDE.md` files across directories
+- **Monitor**: Reads tmux pane options (`@agent_provider`, `@agent_status`) published by hooks
+- **Cost**: Parses JSONL session logs from `~/.claude/projects/`
 - **Budget**: Aggregates token usage from session logs
 
-## Contributing
+### Why Hooks?
 
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+Previous versions used screen scraping and process detection, which caused tmux server issues. Hook-based detection is:
+- **Fast**: Single `tmux list-panes` call vs 40+ subprocess calls
+- **Accurate**: Agents report their own state
+- **Safe**: No risk of wedging tmux
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-Built for use with [Claude Code](https://claude.ai/claude-code) by Anthropic.
+MIT License - see [LICENSE](LICENSE) for details.
 
 ---
 
 <p align="center">
-  <sub>Made with Rust and Claude</sub>
+  <sub>Built for Claude Code, Gemini CLI, and Codex</sub>
 </p>
