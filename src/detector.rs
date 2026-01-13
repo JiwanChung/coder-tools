@@ -182,17 +182,27 @@ fn is_ai_session(content: &str) -> bool {
 
 #[allow(dead_code)]
 fn is_permission_prompt(content: &str) -> bool {
-    let last_lines: String = content.lines().rev().take(20).collect::<Vec<_>>().join("\n");
-    let patterns = [
-        "Allow",
-        "Deny",
+    // Generic permission detection for fallback - require specific interactive patterns
+    let last_lines: Vec<&str> = content.lines().rev().take(10).collect();
+    let last_content = last_lines.join("\n");
+
+    // Look for clear interactive permission prompts
+    let permission_patterns = [
         "Yes, allow",
-        "allow this",
         "Yes, proceed",
         "allow once",
         "allow always",
+        "Don't allow",
+        "(y/n)",
+        "[Y/n]",
+        "[y/N]",
+        "Do you want to allow",
+        "Press y to allow",
     ];
-    patterns.iter().any(|p| last_lines.contains(p))
+
+    permission_patterns
+        .iter()
+        .any(|p| last_content.to_lowercase().contains(&p.to_lowercase()))
 }
 
 #[allow(dead_code)]

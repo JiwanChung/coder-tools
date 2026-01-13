@@ -469,17 +469,31 @@ fn detect_status_from_content(content: &str) -> SessionStatus {
 }
 
 fn is_permission_prompt(content: &str) -> bool {
-    let last_lines: String = content.lines().rev().take(20).collect::<Vec<_>>().join("\n");
-    let patterns = [
-        "Allow",
-        "Deny",
+    // Claude Code permission prompts have specific markers
+    // Check for permission mode indicator (⏵⏵) or specific permission UI elements
+    let last_lines: Vec<&str> = content.lines().rev().take(15).collect();
+    let last_content = last_lines.join("\n");
+
+    // Must have permission mode marker OR be in a clear permission UI state
+    let has_permission_marker = content.contains("⏵⏵");
+
+    // Look for actual interactive permission buttons (very specific patterns)
+    // These appear as selectable options at the bottom of the screen
+    let permission_button_patterns = [
         "Yes, allow",
-        "allow this",
         "Yes, proceed",
         "allow once",
         "allow always",
+        "Don't allow",
+        "Deny once",
     ];
-    patterns.iter().any(|p| last_lines.contains(p))
+
+    let has_permission_buttons = permission_button_patterns
+        .iter()
+        .any(|p| last_content.contains(p));
+
+    // For Claude, require either the permission marker OR clear permission buttons
+    has_permission_marker || has_permission_buttons
 }
 
 fn extract_permission_detail(content: &str) -> Option<String> {
