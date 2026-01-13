@@ -1,6 +1,6 @@
 use crate::app::App;
+use crate::cost;
 use crate::detector::Status;
-use crate::pricing::{format_cost, format_tokens};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -33,7 +33,7 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
 
     let title = vec![
         Span::styled(
-            " Claude Monitor ",
+            " Agent Monitor ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -80,7 +80,7 @@ fn render_pane_list(frame: &mut Frame, app: &App, area: Rect) {
         let message = if app.show_all_panes {
             "No tmux panes found. Is tmux running?"
         } else {
-            "No Claude Code sessions found. Press 'a' to show all panes."
+            "No agent sessions found. Press 'a' to show all panes."
         };
 
         let empty = Paragraph::new(message)
@@ -107,7 +107,7 @@ fn render_pane_list(frame: &mut Frame, app: &App, area: Rect) {
     let title = if app.show_all_panes {
         " All Panes "
     } else {
-        " Claude Code Sessions "
+        " Agent Sessions "
     };
 
     let filter_suffix = match app.status_filter {
@@ -204,40 +204,45 @@ fn render_grouped_items(app: &App, panes: &[&crate::app::PaneState], selected_in
 
         let (_, folder_name) = split_path(&pane_state.pane.current_path);
 
-        let mut spans = vec![
+        // Provider badge if present
+        let provider_span = if let Some(ref provider) = pane_state.pane.agent_provider {
+            let (label, color) = match provider.as_str() {
+                "claude" => ("claude", Color::Magenta),
+                "gemini" => ("gemini", Color::Blue),
+                "codex" => ("codex", Color::Green),
+                _ => (provider.as_str(), Color::DarkGray),
+            };
+            Span::styled(format!("[{}] ", label), Style::default().fg(color))
+        } else {
+            Span::raw("")
+        };
+
+        // Order: status → project_name → provider → pane_number (dimmed) → duration
+        let spans = vec![
             Span::raw("   "), // Indent under session
             Span::styled(
                 format!("{} ", status_icon),
                 Style::default().fg(status_color),
             ),
             Span::styled(
-                format!("{}.{}", pane_state.pane.window_index, pane_state.pane.pane_index),
-                Style::default().add_modifier(if is_selected {
+                folder_name,
+                Style::default().fg(Color::Cyan).add_modifier(if is_selected {
                     Modifier::BOLD | Modifier::UNDERLINED
                 } else {
                     Modifier::BOLD
                 }),
             ),
             Span::raw(" "),
-            Span::styled(folder_name, Style::default().fg(Color::Cyan)),
+            provider_span,
+            Span::styled(
+                format!("{}.{}", pane_state.pane.window_index, pane_state.pane.pane_index),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::styled(
                 format!(" {}", pane_state.status_duration_str()),
                 Style::default().fg(Color::DarkGray),
             ),
         ];
-
-        // Add session cost if available
-        if let Some(ref cost) = pane_state.status.session_cost {
-            spans.push(Span::styled(
-                format!(" {}", format_cost(cost.cost_usd)),
-                Style::default().fg(Color::Magenta),
-            ));
-        } else if let Some(ref tokens) = pane_state.status.tokens {
-            spans.push(Span::styled(
-                format!(" ({})", tokens),
-                Style::default().fg(Color::Magenta),
-            ));
-        }
 
         let style = if is_selected {
             Style::default().bg(Color::DarkGray)
@@ -269,42 +274,44 @@ fn render_compact_items(panes: &[&crate::app::PaneState], selected_index: usize)
             // Get just the folder name for compact view
             let (_, folder_name) = split_path(&pane_state.pane.current_path);
 
-            let mut spans = vec![
+            // Provider badge if present
+            let provider_span = if let Some(ref provider) = pane_state.pane.agent_provider {
+                let (label, color) = match provider.as_str() {
+                    "claude" => ("claude", Color::Magenta),
+                    "gemini" => ("gemini", Color::Blue),
+                    "codex" => ("codex", Color::Green),
+                    _ => (provider.as_str(), Color::DarkGray),
+                };
+                Span::styled(format!("[{}] ", label), Style::default().fg(color))
+            } else {
+                Span::raw("")
+            };
+
+            // Order: status → project_name → provider → pane_number (dimmed) → duration
+            let spans = vec![
                 Span::styled(
                     format!(" {} ", status_icon),
                     Style::default().fg(status_color),
                 ),
                 Span::styled(
-                    pane_state.pane.display_name(),
-                    Style::default().add_modifier(if is_selected {
+                    folder_name,
+                    Style::default().fg(Color::Cyan).add_modifier(if is_selected {
                         Modifier::BOLD | Modifier::UNDERLINED
                     } else {
                         Modifier::BOLD
                     }),
                 ),
                 Span::raw(" "),
+                provider_span,
                 Span::styled(
-                    folder_name,
-                    Style::default().fg(Color::Cyan),
+                    pane_state.pane.display_name(),
+                    Style::default().fg(Color::DarkGray),
                 ),
                 Span::styled(
                     format!(" {}", pane_state.status_duration_str()),
                     Style::default().fg(Color::DarkGray),
                 ),
             ];
-
-            // Add session cost if available, otherwise fallback to tokens
-            if let Some(ref cost) = pane_state.status.session_cost {
-                spans.push(Span::styled(
-                    format!(" {} ({})", format_cost(cost.cost_usd), format_tokens(cost.usage.total())),
-                    Style::default().fg(Color::Magenta),
-                ));
-            } else if let Some(ref tokens) = pane_state.status.tokens {
-                spans.push(Span::styled(
-                    format!(" ({})", tokens),
-                    Style::default().fg(Color::Magenta),
-                ));
-            }
 
             let style = if is_selected {
                 Style::default().bg(Color::DarkGray)
@@ -335,27 +342,43 @@ fn render_full_items(panes: &[&crate::app::PaneState], selected_index: usize) ->
             // Shorten path for display and split into parent + folder name
             let (parent_path, folder_name) = split_path(&pane_state.pane.current_path);
 
+            // Provider badge if present
+            let provider_span = if let Some(ref provider) = pane_state.pane.agent_provider {
+                let (label, color) = match provider.as_str() {
+                    "claude" => ("claude", Color::Magenta),
+                    "gemini" => ("gemini", Color::Blue),
+                    "codex" => ("codex", Color::Green),
+                    _ => (provider.as_str(), Color::DarkGray),
+                };
+                Span::styled(format!("[{}] ", label), Style::default().fg(color))
+            } else {
+                Span::raw("")
+            };
+
+            // Order: status → project_name → provider → pane_number (dimmed)
             let line1 = Line::from(vec![
                 Span::styled(
                     format!(" {} ", status_icon),
                     Style::default().fg(status_color).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    pane_state.pane.display_name(),
-                    Style::default().add_modifier(if is_selected {
+                    folder_name,
+                    Style::default().fg(Color::Cyan).add_modifier(if is_selected {
                         Modifier::BOLD | Modifier::UNDERLINED
                     } else {
                         Modifier::BOLD
                     }),
                 ),
-                Span::raw("  "),
-                Span::styled(parent_path, Style::default().fg(Color::DarkGray)),
+                Span::raw(" "),
+                provider_span,
                 Span::styled(
-                    folder_name,
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    pane_state.pane.display_name(),
+                    Style::default().fg(Color::DarkGray),
                 ),
+                Span::styled(parent_path, Style::default().fg(Color::DarkGray)),
             ]);
 
+            // Build line2 with status, duration, and optional cost
             let mut line2_spans = vec![
                 Span::raw("     "),
                 Span::styled(
@@ -368,17 +391,15 @@ fn render_full_items(panes: &[&crate::app::PaneState], selected_index: usize) ->
                 ),
             ];
 
-            // Add session cost and token usage if available
-            if let Some(ref cost) = pane_state.status.session_cost {
+            // Add token/cost info if available (fetched with '$' key)
+            if let Some(ref tokens) = pane_state.tokens {
                 line2_spans.push(Span::styled(
-                    format!("  {} ({})", format_cost(cost.cost_usd), format_tokens(cost.usage.total())),
-                    Style::default().fg(Color::Magenta),
-                ));
-            } else if let Some(ref tokens) = pane_state.status.tokens {
-                // Fallback to screen-scraped tokens
-                line2_spans.push(Span::styled(
-                    format!(" ({})", tokens),
-                    Style::default().fg(Color::Magenta),
+                    format!(
+                        "  {} tokens  {}",
+                        cost::format_tokens(tokens.total_tokens()),
+                        cost::format_cost(tokens.cost_usd())
+                    ),
+                    Style::default().fg(Color::Yellow),
                 ));
             }
 
@@ -386,61 +407,17 @@ fn render_full_items(panes: &[&crate::app::PaneState], selected_index: usize) ->
 
             let mut lines = vec![line1, line2];
 
-            // Add pane task (from tmux title) if present
-            if let Some(ref task) = pane_state.status.pane_task {
+            // Add task (from @agent_task hook) if present
+            if let Some(ref task) = pane_state.status.task {
                 let task_line = Line::from(vec![
-                    Span::raw("     "),
-                    Span::styled(
-                        task.chars().take(70).collect::<String>(),
-                        Style::default().fg(Color::Cyan),
-                    ),
-                ]);
-                lines.push(task_line);
-            }
-
-            // Add user prompt on separate line if present
-            if let Some(ref prompt) = pane_state.status.last_user_prompt {
-                let truncated: String = prompt.chars().take(80).collect();
-                let prompt_line = Line::from(vec![
                     Span::raw("     "),
                     Span::styled("> ", Style::default().fg(Color::DarkGray)),
                     Span::styled(
-                        truncated,
+                        task.chars().take(70).collect::<String>(),
                         Style::default().fg(Color::White),
                     ),
                 ]);
-                lines.push(prompt_line);
-            }
-
-            // Add tool info if working
-            if status == Status::Working {
-                if let (Some(ref tool), Some(ref detail)) = (&pane_state.status.current_tool, &pane_state.status.tool_detail) {
-                    let tool_line = Line::from(vec![
-                        Span::raw("     "),
-                        Span::styled(format!("{}: ", tool), Style::default().fg(Color::Magenta)),
-                        Span::styled(
-                            detail.chars().take(60).collect::<String>(),
-                            Style::default().fg(Color::White),
-                        ),
-                    ]);
-                    lines.push(tool_line);
-                }
-            }
-
-            // Add detail on separate line(s) if present (and no user prompt shown)
-            if pane_state.status.last_user_prompt.is_none() {
-                if let Some(ref detail) = pane_state.status.detail {
-                    for detail_part in detail.lines() {
-                        let detail_line = Line::from(vec![
-                            Span::raw("       "),
-                            Span::styled(
-                                detail_part.to_string(),
-                                Style::default().fg(Color::White),
-                            ),
-                        ]);
-                        lines.push(detail_line);
-                    }
-                }
+                lines.push(task_line);
             }
 
             let style = if is_selected {
@@ -458,19 +435,8 @@ fn render_stats(frame: &mut Frame, app: &App, area: Rect) {
     use crate::app::format_duration;
 
     let stats = app.aggregated_stats();
-    let panes = app.visible_panes();
 
-    // Calculate total cost and tokens across all panes
-    let mut total_cost: f64 = 0.0;
-    let mut total_tokens: u64 = 0;
-    for pane in &panes {
-        if let Some(ref cost) = pane.status.session_cost {
-            total_cost += cost.cost_usd;
-            total_tokens += cost.usage.total();
-        }
-    }
-
-    let mut lines = vec![
+    let lines = vec![
         Line::from(vec![
             Span::styled(" Aggregated Stats ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         ]),
@@ -482,24 +448,6 @@ fn render_stats(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::raw("  State changes:   "),
             Span::styled(format!("{}", stats.total_state_changes), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  Token Usage & Cost:", Style::default().add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(vec![
-            Span::raw("    Total tokens: "),
-            Span::styled(
-                format_tokens(total_tokens),
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("    Total cost:   "),
-            Span::styled(
-                format_cost(total_cost),
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-            ),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -537,36 +485,6 @@ fn render_stats(frame: &mut Frame, app: &App, area: Rect) {
         ]),
     ];
 
-    // Add per-pane stats
-    if !panes.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("  Per-pane breakdown:", Style::default().add_modifier(Modifier::BOLD)),
-        ]));
-
-        for pane in panes.iter().take(10) {
-            let (_, folder) = split_path(&pane.pane.current_path);
-
-            let cost_str = if let Some(ref cost) = pane.status.session_cost {
-                format!(" {} ({})", format_cost(cost.cost_usd), format_tokens(cost.usage.total()))
-            } else {
-                String::new()
-            };
-
-            lines.push(Line::from(vec![
-                Span::raw("    "),
-                Span::styled(
-                    format!("{:<12}", folder.chars().take(12).collect::<String>()),
-                    Style::default().fg(Color::Cyan),
-                ),
-                Span::styled(
-                    cost_str,
-                    Style::default().fg(Color::Magenta),
-                ),
-            ]));
-        }
-    }
-
     let stats_widget = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
@@ -587,6 +505,8 @@ fn render_footer(frame: &mut Frame, area: Rect) {
         Span::raw("jump  "),
         Span::styled(" y ", Style::default().fg(Color::Yellow)),
         Span::raw("yes  "),
+        Span::styled(" $ ", Style::default().fg(Color::Yellow)),
+        Span::raw("cost  "),
         Span::styled(" s ", Style::default().fg(Color::Yellow)),
         Span::raw("stats  "),
         Span::styled(" g ", Style::default().fg(Color::Yellow)),

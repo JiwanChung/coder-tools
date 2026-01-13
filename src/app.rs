@@ -1,22 +1,22 @@
-use crate::detector::{self, DetectionResult, Status};
+use crate::cost::{self, TokenUsage};
+use crate::detector::{DetectionResult, Status};
 use crate::tmux::{self, Pane};
-use std::time::Duration;
 use anyhow::Result;
-use std::collections::{HashMap, HashSet};
-use std::time::Instant;
 use serde::Serialize;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct PaneState {
     pub pane: Pane,
     pub status: DetectionResult,
-    pub last_content_hash: u64,
     pub last_change: Instant,
     pub status_changed_at: Instant,
     pub previous_status: Option<Status>,
-    pub content_preview: String,
     // Stats tracking
     pub stats: PaneStats,
+    // Token usage (fetched on demand with '$' key)
+    pub tokens: Option<TokenUsage>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -51,7 +51,6 @@ pub fn format_duration(d: Duration) -> String {
 pub struct App {
     pub pane_states: HashMap<String, PaneState>,
     pub selected_index: usize,
-    pub capture_lines: usize,
     pub show_all_panes: bool,
     pub compact_mode: bool,
     pub group_by_session: bool,
@@ -72,14 +71,13 @@ pub struct StateChangeNotification {
 }
 
 impl App {
-    pub fn new(capture_lines: usize, show_all: bool, compact: bool) -> Self {
+    pub fn new(_capture_lines: usize, show_all: bool, compact: bool) -> Self {
         // Get our own pane ID to exclude from monitoring
         let self_pane_id = std::env::var("TMUX_PANE").ok();
 
         Self {
             pane_states: HashMap::new(),
             selected_index: 0,
-            capture_lines,
             show_all_panes: show_all,
             compact_mode: compact,
             group_by_session: false,
@@ -90,6 +88,11 @@ impl App {
         }
     }
 
+    /// Refresh pane states from tmux
+    ///
+    /// This is now a single cheap tmux list-panes call that reads
+    /// hook-published @agent_status and @agent_task options.
+    /// No screen scraping, no file parsing, no subprocess calls.
     pub fn refresh(&mut self) -> Result<Vec<StateChangeNotification>> {
         let panes = tmux::list_panes()?;
 
@@ -105,32 +108,13 @@ impl App {
 
             seen_ids.push(pane.id.clone());
 
-            let content = tmux::capture_pane(&pane.id, self.capture_lines).unwrap_or_default();
-            let content_hash = hash_content(&content);
-
-            // Skip expensive detection if content hasn't changed AND we have a valid detection
-            let status = if let Some(existing) = self.pane_states.get(&pane.id) {
-                if existing.last_content_hash == content_hash
-                    && existing.status.status != Status::NotDetected {
-                    // Content unchanged and we have valid detection, reuse existing status
-                    existing.status.clone()
-                } else {
-                    // Re-detect if content changed OR if previously not detected
-                    detector::detect_status_from_session(&pane.tty, &content, Some(&pane.title))
-                }
-            } else {
-                detector::detect_status_from_session(&pane.tty, &content, Some(&pane.title))
-            };
-
-            // Get preview (last non-empty line)
-            let preview = content
-                .lines()
-                .rev()
-                .find(|l| !l.trim().is_empty())
-                .unwrap_or("")
-                .chars()
-                .take(60)
-                .collect::<String>();
+            // Get status directly from pane options (set by hooks)
+            // Requires @agent_provider to be set to avoid false positives
+            let status = DetectionResult::from_pane(
+                pane.agent_provider.as_deref(),
+                pane.agent_status.as_deref(),
+                pane.agent_task.clone(),
+            );
 
             // Extract folder name for notifications
             let folder_name = pane
@@ -141,19 +125,18 @@ impl App {
                 .to_string();
 
             if let Some(existing) = self.pane_states.get_mut(&pane.id) {
-                // Update existing state
-                if existing.last_content_hash != content_hash {
-                    existing.last_change = Instant::now();
-                    existing.last_content_hash = content_hash;
-                }
                 // Track status changes
                 if existing.status.status != status.status {
+                    existing.last_change = Instant::now();
+
                     // Accumulate time in previous state
                     let elapsed_secs = existing.status_changed_at.elapsed().as_secs();
                     match existing.status.status {
                         Status::Working => existing.stats.total_working_secs += elapsed_secs,
                         Status::WaitingForInput => existing.stats.total_waiting_secs += elapsed_secs,
-                        Status::PermissionRequired => existing.stats.total_permission_secs += elapsed_secs,
+                        Status::PermissionRequired => {
+                            existing.stats.total_permission_secs += elapsed_secs
+                        }
                         Status::NotDetected => {}
                     }
                     existing.stats.state_changes += 1;
@@ -177,7 +160,6 @@ impl App {
                 }
                 existing.pane = pane;
                 existing.status = status;
-                existing.content_preview = preview;
             } else {
                 // New pane
                 self.pane_states.insert(
@@ -185,12 +167,11 @@ impl App {
                     PaneState {
                         pane,
                         status,
-                        last_content_hash: content_hash,
                         last_change: Instant::now(),
                         status_changed_at: Instant::now(),
                         previous_status: None,
-                        content_preview: preview,
                         stats: PaneStats::default(),
+                        tokens: None,
                     },
                 );
             }
@@ -213,11 +194,9 @@ impl App {
             .pane_states
             .values()
             .filter(|p| self.show_all_panes || p.status.status != Status::NotDetected)
-            .filter(|p| {
-                match self.status_filter {
-                    Some(filter) => p.status.status == filter,
-                    None => true,
-                }
+            .filter(|p| match self.status_filter {
+                Some(filter) => p.status.status == filter,
+                None => true,
             })
             .collect();
 
@@ -326,6 +305,17 @@ impl App {
         }
     }
 
+    /// Refresh token usage and costs for all Claude panes
+    pub fn refresh_costs(&mut self) {
+        for pane_state in self.pane_states.values_mut() {
+            // Only fetch for Claude sessions
+            if pane_state.pane.agent_provider.as_deref() == Some("claude") {
+                let usage = cost::get_claude_usage(&pane_state.pane.current_path);
+                pane_state.tokens = Some(usage);
+            }
+        }
+    }
+
     pub fn selected_pane(&self) -> Option<&PaneState> {
         let panes = self.visible_panes();
         panes.get(self.selected_index).copied()
@@ -379,13 +369,6 @@ impl AggregatedStats {
     }
 }
 
-fn hash_content(content: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    content.hash(&mut hasher);
-    hasher.finish()
-}
-
 #[derive(Serialize)]
 pub struct ExportData {
     pub timestamp: String,
@@ -410,6 +393,7 @@ pub struct ExportPane {
     pub pane: u32,
     pub path: String,
     pub current_status: String,
+    pub task: Option<String>,
     pub working_secs: u64,
     pub waiting_secs: u64,
     pub permission_secs: u64,
@@ -443,6 +427,7 @@ impl App {
                     pane: p.pane.pane_index,
                     path: p.pane.current_path.clone(),
                     current_status: p.status.status.label().to_string(),
+                    task: p.status.task.clone(),
                     working_secs: working,
                     waiting_secs: waiting,
                     permission_secs: permission,

@@ -1,9 +1,8 @@
 mod app;
 mod budget;
+mod cost;
 mod detector;
 mod notify;
-mod pricing;
-mod providers;
 mod resume;
 mod sync;
 mod tmux;
@@ -38,11 +37,7 @@ enum Commands {
         #[arg(short, long, default_value = "2")]
         interval: u64,
 
-        /// Number of lines to capture from each pane
-        #[arg(short, long, default_value = "50")]
-        lines: usize,
-
-        /// Show all panes, not just Claude Code sessions
+        /// Show all panes, not just agent sessions
         #[arg(short, long)]
         all: bool,
 
@@ -84,12 +79,11 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Monitor {
             interval,
-            lines,
             all,
             compact,
             notify,
             jump,
-        } => run_monitor(interval, lines, all, compact, notify, jump),
+        } => run_monitor(interval, all, compact, notify, jump),
 
         Commands::Resume { action } => resume::run(action),
         Commands::Sync { action } => sync::run(action),
@@ -99,7 +93,6 @@ fn main() -> Result<()> {
 
 fn run_monitor(
     interval: u64,
-    lines: usize,
     all: bool,
     compact: bool,
     notify_enabled: bool,
@@ -113,7 +106,7 @@ fn run_monitor(
     let mut terminal = Terminal::new(backend)?;
 
     // Run app
-    let result = run_monitor_app(&mut terminal, interval, lines, all, compact, notify_enabled, jump_enabled);
+    let result = run_monitor_app(&mut terminal, interval, all, compact, notify_enabled, jump_enabled);
 
     // Restore terminal
     disable_raw_mode()?;
@@ -130,13 +123,12 @@ fn run_monitor(
 fn run_monitor_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     interval: u64,
-    lines: usize,
     all: bool,
     compact: bool,
     notify_enabled: bool,
     jump_enabled: bool,
 ) -> Result<()> {
-    let mut app = App::new(lines, all, compact);
+    let mut app = App::new(0, all, compact); // 0 is unused placeholder
     let refresh_interval = Duration::from_secs(interval);
 
     // Initial refresh
@@ -181,6 +173,7 @@ fn run_monitor_app<B: ratatui::backend::Backend>(
                         }
                         KeyCode::Char('a') => app.toggle_show_all(),
                         KeyCode::Char('c') => app.toggle_compact(),
+                        KeyCode::Char('$') => app.refresh_costs(),
                         KeyCode::Char('w') => app.toggle_filter_working(),
                         KeyCode::Char('i') => app.toggle_filter_waiting(),
                         KeyCode::Char('g') => app.toggle_grouping(),

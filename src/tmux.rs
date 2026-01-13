@@ -43,8 +43,12 @@ pub struct Pane {
     pub window_index: u32,
     pub pane_index: u32,
     pub current_path: String,
-    pub tty: String,
-    pub title: String,
+    /// Agent provider from hook-published @agent_provider option (claude, gemini, codex)
+    pub agent_provider: Option<String>,
+    /// Agent status from hook-published @agent_status option
+    pub agent_status: Option<String>,
+    /// Agent task from hook-published @agent_task option
+    pub agent_task: Option<String>,
 }
 
 impl Pane {
@@ -56,14 +60,12 @@ impl Pane {
     }
 }
 
+/// Format string for list-panes: includes hook-published agent provider, status and task
+const PANE_FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_current_path}\t#{@agent_provider}\t#{@agent_status}\t#{@agent_task}";
+
 pub fn list_panes() -> Result<Vec<Pane>> {
     let output = Command::new("tmux")
-        .args([
-            "list-panes",
-            "-a",
-            "-F",
-            "#{pane_id}\t#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_current_path}\t#{pane_tty}\t#{pane_title}",
-        ])
+        .args(["list-panes", "-a", "-F", PANE_FORMAT])
         .output()
         .context("Failed to execute tmux list-panes")?;
 
@@ -80,15 +82,30 @@ pub fn list_panes() -> Result<Vec<Pane>> {
         .lines()
         .filter_map(|line| {
             let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() >= 7 {
+            if parts.len() >= 5 {
+                // Parse agent_provider, agent_status, agent_task (may be empty)
+                let agent_provider = parts.get(5).and_then(|s| {
+                    let s = s.trim();
+                    if s.is_empty() { None } else { Some(s.to_string()) }
+                });
+                let agent_status = parts.get(6).and_then(|s| {
+                    let s = s.trim();
+                    if s.is_empty() { None } else { Some(s.to_string()) }
+                });
+                let agent_task = parts.get(7).and_then(|s| {
+                    let s = s.trim();
+                    if s.is_empty() { None } else { Some(s.to_string()) }
+                });
+
                 Some(Pane {
                     id: parts[0].to_string(),
                     session_name: parts[1].to_string(),
                     window_index: parts[2].parse().unwrap_or(0),
                     pane_index: parts[3].parse().unwrap_or(0),
                     current_path: parts[4].to_string(),
-                    tty: parts[5].to_string(),
-                    title: parts[6].to_string(),
+                    agent_provider,
+                    agent_status,
+                    agent_task,
                 })
             } else {
                 None
@@ -97,21 +114,6 @@ pub fn list_panes() -> Result<Vec<Pane>> {
         .collect();
 
     Ok(panes)
-}
-
-pub fn capture_pane(pane_id: &str, lines: usize) -> Result<String> {
-    let start_line = format!("-{}", lines);
-    let output = Command::new("tmux")
-        .args(["capture-pane", "-t", pane_id, "-p", "-S", &start_line])
-        .output()
-        .context("Failed to execute tmux capture-pane")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("tmux capture-pane failed: {}", stderr);
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 #[cfg(test)]
@@ -126,8 +128,9 @@ mod tests {
             window_index: 1,
             pane_index: 0,
             current_path: "/home/user".to_string(),
-            tty: "/dev/ttys001".to_string(),
-            title: "test title".to_string(),
+            agent_provider: Some("claude".to_string()),
+            agent_status: Some("working".to_string()),
+            agent_task: Some("fix the bug".to_string()),
         };
         assert_eq!(pane.display_name(), "dev:1.0");
     }
