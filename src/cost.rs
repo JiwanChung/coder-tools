@@ -39,9 +39,9 @@ fn claude_projects_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("projects"))
 }
 
-/// Hash a path the way Claude does (simple replacement)
+/// Hash a path the way Claude does (replace / and _ with -)
 fn hash_path(path: &str) -> String {
-    path.replace('/', "-")
+    path.replace('/', "-").replace('_', "-")
 }
 
 /// Find JSONL session files for a given working directory
@@ -84,10 +84,14 @@ fn parse_jsonl_tokens(path: &Path) -> TokenUsage {
             continue;
         }
 
-        // Parse JSON and extract usage field
+        // Parse JSON and extract usage field (nested inside "message")
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
-            // Look for usage in response
-            if let Some(usage_obj) = json.get("usage") {
+            // Usage is nested: {"message": {"usage": {...}}}
+            let usage_obj = json
+                .get("message")
+                .and_then(|m| m.get("usage"));
+
+            if let Some(usage_obj) = usage_obj {
                 if let Some(input) = usage_obj.get("input_tokens").and_then(|v| v.as_u64()) {
                     usage.input_tokens += input;
                 }
