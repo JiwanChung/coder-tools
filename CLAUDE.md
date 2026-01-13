@@ -5,35 +5,120 @@ CLI utilities for monitoring and managing AI coding assistant sessions.
 ## Supported Providers
 
 - **Claude Code** - Full support (status, tokens, cost)
-- **OpenAI/ChatGPT CLI** - Planned
-- **Gemini** - Planned
+- **Gemini CLI** - Status detection via hooks
+- **OpenAI Codex** - Status detection via hooks/wrapper
 
-## Tools
+## Commands
 
 ### coder-tools monitor
 
 TUI dashboard for monitoring AI coding sessions across tmux panes.
 
 **Features:**
-- Real-time status detection (waiting, working, permission required, idle)
-- Token usage and cost tracking per session (USD)
+- Real-time status detection (waiting, working, permission required)
+- Token usage and cost tracking (press `$` to fetch)
 - Auto-refresh with configurable interval
-- Filter by provider or show all panes
-- Keyboard navigation
+- Filter by status, group by session
+- Keyboard navigation and quick actions
 
 **Usage:**
 ```bash
 coder-tools monitor              # Default: 2s refresh
 coder-tools monitor -a           # Show all panes
 coder-tools monitor -i 5         # Refresh every 5 seconds
+coder-tools monitor -n           # Enable desktop notifications
 coder-tools monitor --help       # Full options
 ```
+
+**Keyboard shortcuts:**
+- `q` - Quit
+- `↑↓` / `jk` - Navigate
+- `Enter` - Jump to pane
+- `y` - Send 'y' + Enter (approve permission)
+- `$` - Fetch token/cost data
+- `s` - Toggle stats view
+- `g` - Group by session
+- `w` / `i` - Filter working / waiting
+- `a` - Show all panes
+- `c` - Compact mode
 
 **Status indicators:**
 - `>_` Green - Waiting for input
 - `◐` Yellow - Working/thinking
 - `⚠` Red - Permission required
 - `--` Gray - Not an AI session
+
+### coder-tools budget
+
+Track and manage token usage budgets.
+
+```bash
+coder-tools budget status        # Show current usage
+coder-tools budget set --daily 100k --monthly 10m
+coder-tools budget report        # Detailed breakdown
+coder-tools budget reset         # Clear counters
+```
+
+### coder-tools resume
+
+List and restore previous Claude Code sessions.
+
+### coder-tools sync
+
+Sync CLAUDE.md files across projects.
+
+## Hook-Based Detection
+
+Detection uses tmux pane options published by agent hooks. No screen scraping or process detection.
+
+### Setup
+
+**Claude Code** (`~/.claude/settings.json`):
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{
+      "hooks": [{
+        "type": "command",
+        "command": "bash -c 'TASK=$(jq -r \".prompt // empty\" | tr \"\\n\" \" \" | head -c 100); tmux set -p @agent_provider claude \\; set -p @agent_task \"$TASK\" \\; set -p @agent_status working 2>/dev/null'"
+      }]
+    }],
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "tmux set -p @agent_status waiting 2>/dev/null || true"
+      }]
+    }],
+    "PermissionRequest": [{
+      "hooks": [{
+        "type": "command",
+        "command": "tmux set -p @agent_status permission 2>/dev/null || true"
+      }]
+    }]
+  }
+}
+```
+
+**Gemini CLI** (`~/.gemini/settings.json`):
+```json
+{
+  "experiments": { "enableHooks": true },
+  "hooks": {
+    "BeforeAgent": [{ "hooks": [{ "type": "command", "command": "tmux set -p @agent_provider gemini \\; set -p @agent_status working 2>/dev/null" }] }],
+    "AfterAgent": [{ "hooks": [{ "type": "command", "command": "tmux set -p @agent_status waiting 2>/dev/null" }] }]
+  }
+}
+```
+
+**Codex CLI**: Use wrapper script (`~/.local/bin/codex-wrapper`).
+
+### tmux Pane Options
+
+| Option | Values | Description |
+|--------|--------|-------------|
+| `@agent_provider` | `claude`, `gemini`, `codex` | Which agent |
+| `@agent_status` | `working`, `waiting`, `permission` | Current state |
+| `@agent_task` | User's prompt (truncated) | What it's working on |
 
 ## Project Structure
 
@@ -42,69 +127,42 @@ coder-tools/
 ├── src/
 │   ├── main.rs           # CLI args, event loop, terminal setup
 │   ├── app.rs            # Application state management
-│   ├── providers/        # Provider-specific detection (planned)
-│   │   ├── mod.rs
-│   │   ├── claude.rs     # Claude Code detection
-│   │   ├── openai.rs     # OpenAI CLI detection
-│   │   └── gemini.rs     # Gemini detection
-│   ├── detector.rs       # Provider-agnostic status detection
-│   ├── pricing.rs        # Token pricing (multi-provider)
+│   ├── detector.rs       # Status detection from pane options
+│   ├── cost.rs           # Token counting and cost calculation
 │   ├── tmux.rs           # tmux interaction
-│   └── ui.rs             # TUI rendering
+│   ├── ui.rs             # TUI rendering
+│   ├── budget.rs         # Budget tracking
+│   ├── resume.rs         # Session restoration
+│   ├── sync.rs           # CLAUDE.md syncing
+│   └── notify.rs         # Desktop notifications
 ├── Cargo.toml
 └── CLAUDE.md
 ```
 
-## Provider Detection
-
-Each provider has unique signals:
-
-### Claude Code
-- Pane title contains `✳` marker
-- Session files at `~/.claude/projects/{path}/*.jsonl`
-- Debug logs at `~/.claude/debug/{session}.txt`
-
-### OpenAI CLI (planned)
-- Process name detection
-- Config at `~/.config/openai/` or similar
-
-### Gemini (planned)
-- Process name detection
-- Config at `~/.config/gemini/` or similar
-
 ## Cost Tracking
 
-Pricing sources:
-- **Claude**: [Anthropic Pricing](https://platform.claude.com/docs/en/about-claude/pricing)
-- **OpenAI**: [OpenAI Pricing](https://openai.com/pricing) (planned)
-- **Gemini**: [Google AI Pricing](https://ai.google.dev/pricing) (planned)
+Reads Claude session files at `~/.claude/projects/{path_hash}/*.jsonl`.
+
+Path hash: Replace `/` and `_` with `-` (e.g., `/Users/foo/my_project` → `-Users-foo-my-project`)
+
+Pricing (Sonnet 3.5):
+- Input: $3/M tokens
+- Output: $15/M tokens
+- Cache read: $0.30/M tokens
+- Cache write: $3.75/M tokens
 
 ## Development
 
-### Build & Run
 ```bash
 cargo build --release
 cargo install --path .
-```
-
-### Testing
-```bash
 cargo test
-cargo clippy
-cargo fmt
 ```
-
-### Adding a New Provider
-
-1. Create `src/providers/{name}.rs`
-2. Implement the `Provider` trait
-3. Add pricing to `src/pricing.rs`
-4. Register in `src/providers/mod.rs`
 
 ## Dependencies
 
 - `ratatui` + `crossterm` - TUI framework
 - `clap` - CLI argument parsing
 - `anyhow` - Error handling
-- `tokio` - Async runtime
 - `serde` / `serde_json` - Serialization
+- `dirs` - Home directory detection
