@@ -450,26 +450,17 @@ fn detect_status_from_content(content: &str) -> SessionStatus {
 }
 
 fn is_permission_prompt(content: &str) -> bool {
-    // Codex CLI shows approval prompts with specific formatting
-    let last_lines: Vec<&str> = content.lines().rev().take(10).collect();
-    let last_content = last_lines.join("\n");
-
-    // Look for Codex-specific permission patterns
-    // Codex shows tool approval with specific UI elements
-    let permission_patterns = [
-        "approve this",
-        "Do you want to run",
-        "execute this",
-        "Allow codex to",
-        "(y/n)",
-        "[Y/n]",
-        "[y/N]",
-        "Press y to allow",
+    let last_lines: String = content.lines().rev().take(20).collect::<Vec<_>>().join("\n");
+    let patterns = [
+        "Allow",
+        "Deny",
+        "approve",
+        "permission",
+        "[y/n]",
+        "Yes, allow",
+        "allow once",
     ];
-
-    permission_patterns
-        .iter()
-        .any(|p| last_content.to_lowercase().contains(&p.to_lowercase()))
+    patterns.iter().any(|p| last_lines.to_lowercase().contains(&p.to_lowercase()))
 }
 
 fn extract_permission_detail(content: &str) -> Option<String> {

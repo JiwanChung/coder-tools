@@ -398,25 +398,20 @@ fn detect_status_from_content(content: &str) -> SessionStatus {
 }
 
 fn is_permission_prompt(content: &str) -> bool {
-    // Gemini CLI permission prompts appear at the bottom with specific formatting
-    let last_lines: Vec<&str> = content.lines().rev().take(10).collect();
-    let last_content = last_lines.join("\n");
-
-    // Look for Gemini-specific permission patterns
-    // Gemini shows tool execution prompts with specific formatting
-    let permission_patterns = [
-        "Do you want to allow",
-        "Allow this action",
-        "execute this command",
-        "run this command",
-        "(y/n)",
-        "[Y/n]",
-        "[y/N]",
+    let last_lines: String = content.lines().rev().take(20).collect::<Vec<_>>().join("\n");
+    let patterns = [
+        "Allow",
+        "Deny",
+        "approve",
+        "permission",
+        "[y/n]",
+        "Yes, allow",
+        "allow once",
+        "YOLO",
     ];
-
-    permission_patterns
+    patterns
         .iter()
-        .any(|p| last_content.to_lowercase().contains(&p.to_lowercase()))
+        .any(|p| last_lines.to_lowercase().contains(&p.to_lowercase()))
 }
 
 fn extract_permission_detail(content: &str) -> Option<String> {
