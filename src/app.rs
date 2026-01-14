@@ -109,11 +109,12 @@ impl App {
             seen_ids.push(pane.id.clone());
 
             // Get status directly from pane options (set by hooks)
-            // Requires @agent_provider to be set to avoid false positives
+            // Requires @agent_provider to be set AND agent to be running
             let status = DetectionResult::from_pane(
                 pane.agent_provider.as_deref(),
                 pane.agent_status.as_deref(),
                 pane.agent_task.clone(),
+                &pane.current_command,
             );
 
             // Extract folder name for notifications

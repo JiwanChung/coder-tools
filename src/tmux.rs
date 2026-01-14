@@ -43,6 +43,8 @@ pub struct Pane {
     pub window_index: u32,
     pub pane_index: u32,
     pub current_path: String,
+    /// Current command running in the pane (for validating agent is still running)
+    pub current_command: String,
     /// Agent provider from hook-published @agent_provider option (claude, gemini, codex)
     pub agent_provider: Option<String>,
     /// Agent status from hook-published @agent_status option
@@ -61,7 +63,7 @@ impl Pane {
 }
 
 /// Format string for list-panes: includes hook-published agent provider, status and task
-const PANE_FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_current_path}\t#{@agent_provider}\t#{@agent_status}\t#{@agent_task}";
+const PANE_FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_current_path}\t#{pane_current_command}\t#{@agent_provider}\t#{@agent_status}\t#{@agent_task}";
 
 pub fn list_panes() -> Result<Vec<Pane>> {
     let output = Command::new("tmux")
@@ -82,17 +84,17 @@ pub fn list_panes() -> Result<Vec<Pane>> {
         .lines()
         .filter_map(|line| {
             let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() >= 5 {
+            if parts.len() >= 6 {
                 // Parse agent_provider, agent_status, agent_task (may be empty)
-                let agent_provider = parts.get(5).and_then(|s| {
+                let agent_provider = parts.get(6).and_then(|s| {
                     let s = s.trim();
                     if s.is_empty() { None } else { Some(s.to_string()) }
                 });
-                let agent_status = parts.get(6).and_then(|s| {
+                let agent_status = parts.get(7).and_then(|s| {
                     let s = s.trim();
                     if s.is_empty() { None } else { Some(s.to_string()) }
                 });
-                let agent_task = parts.get(7).and_then(|s| {
+                let agent_task = parts.get(8).and_then(|s| {
                     let s = s.trim();
                     if s.is_empty() { None } else { Some(s.to_string()) }
                 });
@@ -103,6 +105,7 @@ pub fn list_panes() -> Result<Vec<Pane>> {
                     window_index: parts[2].parse().unwrap_or(0),
                     pane_index: parts[3].parse().unwrap_or(0),
                     current_path: parts[4].to_string(),
+                    current_command: parts[5].to_string(),
                     agent_provider,
                     agent_status,
                     agent_task,
@@ -128,6 +131,7 @@ mod tests {
             window_index: 1,
             pane_index: 0,
             current_path: "/home/user".to_string(),
+            current_command: "2.1.7".to_string(),
             agent_provider: Some("claude".to_string()),
             agent_status: Some("working".to_string()),
             agent_task: Some("fix the bug".to_string()),

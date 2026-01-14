@@ -1,6 +1,6 @@
 [package]
 name = "coder-tools"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "CLI tools for AI coding assistants - monitor sessions across Claude, OpenAI, Gemini"
 license = "MIT"
